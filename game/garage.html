@@ -149,22 +149,6 @@
   const ASSETS = new URL('../assets/', location.href), assetUrl = (p) => new URL(p, ASSETS).href;
   const ALL = {
     alfa33:      { name: 'Alfa Romeo 33', blurb: '1992 Series 2 hatchback.' },
-    fiat500e:    { name: 'Fiat 500e', blurb: '2020 electric three-door.' },
-    ferrari296:  { name: 'Ferrari 296 GTB', blurb: '2022 mid-engined V6 hybrid.', mid: true },
-    ferrari12c:  { name: 'Ferrari 12Cilindri', blurb: '2024 front-mid V12 berlinetta.' },
-    purosangue:  { name: 'Ferrari Purosangue', blurb: '2023 four-door V12; rear doors hinged at the back.', rearDoorsBackHinged: true },
-    giulia:      { name: 'Alfa Giulia QV', blurb: '2016 Quadrifoglio saloon, 2.9 V6 twin-turbo.' },
-    stradale33:  { name: 'Alfa 33 Stradale', blurb: '2023 mid-engined V6, butterfly doors.', doors: 'scissor', mid: true },
-    junior:      { name: 'Alfa Junior', blurb: '2024 electric compact crossover.' },
-    temerario:   { name: 'Lamborghini Temerario', blurb: '2024 mid-engined V8 hybrid.', mid: true },
-    revuelto:    { name: 'Lamborghini Revuelto', blurb: '2023 mid-engined V12 hybrid, scissor doors.', doors: 'scissor', mid: true },
-    urus:        { name: 'Lamborghini Urus', blurb: '2024 SE: V8 hybrid SUV.' },
-    ypsilon:     { name: 'Lancia Ypsilon', blurb: '2024 electric five-door.' },
-    delta:       { name: 'Lancia Delta Integrale', blurb: '1991 Evoluzione: turbo four, 4WD.' },
-    mc20:        { name: 'Maserati MC20', blurb: '2020 mid-engined V6, butterfly doors.', doors: 'scissor', mid: true },
-    granturismo: { name: 'Maserati GranTurismo', blurb: '2023 2+2 coupe, V6.' },
-    grandepanda: { name: 'Fiat Grande Panda', blurb: '2024 electric compact five-door.' },
-    utopia:      { name: 'Pagani Utopia', blurb: '2022 mid-engined V12, gullwing doors.', doors: 'gullwing', mid: true },
   };
   const only = (new URLSearchParams(location.search).get('cars') || '').split(',').filter((k) => ALL[k]);
   const IDS = only.length ? only : Object.keys(ALL);

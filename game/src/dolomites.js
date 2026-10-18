@@ -3521,7 +3521,9 @@ void main() {
 
   // ---------- driving: cannon RaycastVehicle (same tuning as the Po map) on a heightfield window that follows the car ----------
   const DRIVE = !QS.has('shot') && car && typeof CANNON !== 'undefined';
-  const keys = {}; let driving = false, chassis = null, vehicle = null, steer = 0, camMode = 0, physWorld = null;
+  const keys = {}, touchKeys = {};
+  const touchDriving = isTouch || navigator.maxTouchPoints > 0 || QS.has('touch');
+  let driving = false, chassis = null, vehicle = null, steer = 0, camMode = 0, physWorld = null;
   const wheels = []; let C0Y = 0.6;
   const fwdV = new CANNON.Vec3();
   const HF_N = 160, HF_TS = 2, hf = { body: null, cx: 1e9, cz: 1e9 };
@@ -3580,10 +3582,49 @@ void main() {
     }
     mark('spawn'); spawnAt(startI); mark('spawned');
     driving = true;
+    const resetCar = () => spawnAt(roadIndexNear(chassis.position.x, chassis.position.z));
+    const cycleCamera = () => { camMode = (camMode + 1) % 3; if (camMode === 2) camera.attachControl(canvas, true); else camera.detachControl(); };
+    if (touchDriving) {
+      document.body.classList.add('corridor-touch');
+      const pad = document.createElement('div'); pad.id = 'driveTouch';
+      pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button></div>' +
+        '<div class="touch-steer"><button type="button" data-key="KeyA" aria-label="Steer left">◀</button><button type="button" data-key="KeyD" aria-label="Steer right">▶</button></div>' +
+        '<div class="touch-pedals"><button type="button" class="touch-hand" data-key="Space" aria-label="Handbrake">HANDBRAKE</button><button type="button" class="touch-brake" data-key="KeyS" aria-label="Brake; hold at standstill to reverse">BRAKE<span> / REVERSE</span></button><button type="button" class="touch-gas" data-key="KeyW" aria-label="Accelerate">GAS</button></div>';
+      document.body.appendChild(pad);
+      const held = new Map();
+      const sync = () => {
+        for (const button of pad.querySelectorAll('[data-key]')) {
+          const on = Array.from(held.values()).includes(button);
+          touchKeys[button.dataset.key] = on;
+          button.classList.toggle('pressed', on); button.setAttribute('aria-pressed', String(on));
+        }
+      };
+      const release = e => { held.delete(e.pointerId); sync(); };
+      for (const button of pad.querySelectorAll('[data-key]')) {
+        button.addEventListener('pointerdown', e => {
+          if (e.pointerType === 'mouse' && e.button !== 0) return;
+          e.preventDefault(); held.set(e.pointerId, button); sync();
+          try { button.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
+        });
+        button.addEventListener('lostpointercapture', release);
+        button.addEventListener('contextmenu', e => e.preventDefault());
+      }
+      window.addEventListener('pointerup', release);
+      window.addEventListener('pointercancel', release);
+      const clear = () => { held.clear(); sync(); };
+      window.addEventListener('blur', clear);
+      window.addEventListener('pagehide', clear);
+      window.addEventListener('resize', clear);
+      document.addEventListener('visibilitychange', () => { if (document.hidden) clear(); });
+      pad.querySelector('[data-action="camera"]').addEventListener('click', cycleCamera);
+      pad.querySelector('[data-action="reset"]').addEventListener('click', () => { clear(); resetCar(); });
+      sync();
+    }
+    window.addEventListener('blur', () => { for (const key of Object.keys(keys)) keys[key] = false; });
     window.addEventListener('keydown', (e) => {
       keys[e.code] = true;
-      if (e.code === 'KeyR') spawnAt(roadIndexNear(chassis.position.x, chassis.position.z));
-      if (e.code === 'KeyC') { camMode = (camMode + 1) % 3; if (camMode === 2) camera.attachControl(canvas, true); else camera.detachControl(); }
+      if (e.code === 'KeyR' && !e.repeat) resetCar();
+      if (e.code === 'KeyC' && !e.repeat) cycleCamera();
       if (e.code === 'Enter') driving = !driving;
       if (['ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
     });
@@ -3632,12 +3673,12 @@ void main() {
   const driveStep = (dt) => {
     chassis.quaternion.vmult(new CANNON.Vec3(0, 0, 1), fwdV);
     const vF = chassis.velocity.dot(fwdV), kmh = Math.abs(vF) * 3.6, on = driving;
-    const kUp = on && (keys.ArrowUp || keys.KeyW), kDown = on && (keys.ArrowDown || keys.KeyS), kL = on && (keys.ArrowLeft || keys.KeyA), kR = on && (keys.ArrowRight || keys.KeyD), hand = !on || keys.Space;
+    const kUp = on && (keys.ArrowUp || keys.KeyW || touchKeys.KeyW), kDown = on && (keys.ArrowDown || keys.KeyS || touchKeys.KeyS), kL = on && (keys.ArrowLeft || keys.KeyA || touchKeys.KeyA), kR = on && (keys.ArrowRight || keys.KeyD || touchKeys.KeyD), hand = !on || keys.Space || touchKeys.Space;
     const AP = autopilot && autopilot.on ? autopilot.step(chassis, fwdV, kmh) : null;     // test hook: follows the route, ?autodrive
     const maxSteer = 0.42 + (0.09 - 0.42) * Math.min(1, kmh / 130), target = AP ? Math.max(-1, Math.min(1, AP.steer)) * maxSteer : ((kR ? 1 : 0) - (kL ? 1 : 0)) * maxSteer;
     steer += (target - steer) * Math.min(1, dt * (target === 0 ? 4.0 : 2.4));
     let eng = 0, brake = 0;
-    const thr = AP ? AP.thr : kUp ? 1 : 0, brk = AP ? AP.brk : kDown ? 1 : 0;
+    const thr = AP ? AP.thr : kUp && !kDown ? 1 : 0, brk = AP ? AP.brk : kDown ? 1 : 0;
     if (thr > 0) eng = -2500 * thr * Math.max(0, 1 - Math.pow(kmh / 205, 1.6)) * (vF < -0.5 ? 1.4 : 1);
     if (brk > 0) { if (vF > 0.8) brake = 60 * brk; else eng = 1100 * brk * Math.max(0, 1 - kmh / 35); }
     if (!thr && !brk) brake = on ? 4 : 0;
@@ -3667,7 +3708,7 @@ void main() {
       camera.setTarget(cp.add(fw.scale(3)).add(new V3(0, 0.6, 0))); camera.fov = 0.9 + Math.min(0.2, kmh / 650);
     }
     shadeT += dt; if (shadeT > 0.15) { shadeT = 0; const st = structAt(cp.x, cp.z); carShade = st && st[4] === 1 ? 0.04 : shadeAt(cp.x, cp.y + 0.8, cp.z); }     // under a tunnel vault: no sun on the car
-    if (modeChip) modeChip.textContent = Math.round(kmh) + ' km/h · WASD drive · Space handbrake · C camera · R reset · G look panel';
+    if (modeChip) modeChip.textContent = Math.round(kmh) + (touchDriving ? ' km/h' : ' km/h · WASD drive · Space handbrake · C camera · R reset · G look panel');
   };
   // ---------- debug panel: sun, fog, exposure, saturation, LUT; G toggles ----------
   const panel = document.createElement('div');
@@ -3682,7 +3723,7 @@ void main() {
       '<button id="copyLook" style="margin-top:6px">Copy settings</button>';
   };
   build(); document.body.appendChild(panel);
-  if (QS.has('shot') || QS.has('nopanel')) panel.style.display = 'none';
+  if (QS.has('shot') || QS.has('nopanel') || touchDriving) panel.style.display = 'none';
   let atmT = 0;
   const atmosphereSoon = () => { clearTimeout(atmT); atmT = setTimeout(() => { updateAtmosphere(); applyLook(); }, 60); };
   panel.addEventListener('input', (e) => {
@@ -4073,7 +4114,7 @@ void main() {
   });
   const inst = new BABYLON.EngineInstrumentation(engine); inst.captureGPUFrameTime = true;
   const sinst = new BABYLON.SceneInstrumentation(scene); sinst.captureFrameTime = true;
-  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, detailAt, aData, LVL, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
+  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, detailAt, aData, LVL, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
     setPreset: (p) => { Object.assign(P, PRESETS[p]); updateAtmosphere(); applyLook(); },
     set: (o) => { Object.assign(P, o); updateAtmosphere(); applyLook(); },
     get frames() { return frames; }, get nodes() { return nodeCount; },

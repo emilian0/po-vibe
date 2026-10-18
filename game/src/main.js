@@ -49,22 +49,6 @@
   // drivable cars; choose with ?car=<id> or the Car button. Sizes in metres, game frame (+z forward, origin at the wheelbase centre on the ground).
   const CARS = {
     alfa33:   { file: 'cars/alfa33.glb',   name: 'Alfa 33',   desc: 'a red Alfa Romeo 33', vmax: 205, eye: [-0.37, 1.12, -0.25], lamp: [0.52, 0.60, 1.95], ev: false },
-    fiat500e: { file: 'cars/fiat500e.glb', name: 'Fiat 500e', desc: 'a pale blue Fiat 500e', vmax: 150, eye: [-0.37, 1.20, -0.42], lamp: [0.47, 0.72, 1.80], ev: true },
-    ferrari296: { file: 'cars/ferrari296.glb', name: 'Ferrari 296', desc: 'a red Ferrari 296 GTB', vmax: 330, power: 1.25, eye: [-0.36, 0.98, -0.05], lamp: [0.655, 0.555, 2.22], ev: false, mid: true, redline: 8500, cyl: 6 },
-    ferrari12c: { file: 'cars/ferrari12c.glb', name: 'Ferrari 12Cilindri', desc: 'a yellow Ferrari 12Cilindri', vmax: 340, power: 1.25, eye: [-0.37, 1.02, -0.37], lamp: [0.64, 0.58, 2.21], ev: false, redline: 9500, cyl: 12 },
-    purosangue: { file: 'cars/purosangue.glb', name: 'Ferrari Purosangue', desc: 'a dark blue Ferrari Purosangue', vmax: 310, power: 1.2, eye: [-0.38, 1.32, -0.28], lamp: [0.66, 0.83, 2.33], ev: false, redline: 8250, cyl: 12, rearDoorsBackHinged: true },
-    giulia: { file: 'cars/giulia.glb', name: 'Alfa Giulia QV', desc: 'a green Alfa Romeo Giulia Quadrifoglio', vmax: 307, power: 1.2, eye: [-0.38, 1.17, -0.36], lamp: [0.62, 0.68, 2.12], ev: false, redline: 7000, cyl: 6 },
-    stradale33: { file: 'cars/stradale33.glb', name: 'Alfa 33 Stradale', desc: 'a red Alfa Romeo 33 Stradale', vmax: 333, power: 1.25, eye: [-0.36, 1.01, -0.11], lamp: [0.6, 0.58, 2.3], ev: false, mid: true, redline: 7500, cyl: 6, doors: 'scissor' },
-    junior: { file: 'cars/junior.glb', name: 'Alfa Junior', desc: 'a red Alfa Romeo Junior', vmax: 200, power: 1.0, eye: [-0.37, 1.28, -0.15], lamp: [0.58, 0.82, 1.99], ev: true },
-    temerario: { file: 'cars/temerario.glb', name: 'Lamborghini Temerario', desc: 'a green Lamborghini Temerario', vmax: 343, power: 1.3, eye: [-0.36, 1.0, -0.08], lamp: [0.66, 0.57, 2.38], ev: false, mid: true, redline: 10000, cyl: 8 },
-    revuelto: { file: 'cars/revuelto.glb', name: 'Lamborghini Revuelto', desc: 'an orange Lamborghini Revuelto', vmax: 350, power: 1.3, eye: [-0.36, 0.99, -0.11], lamp: [0.66, 0.54, 2.37], ev: false, mid: true, redline: 9500, cyl: 12, doors: 'scissor' },
-    urus: { file: 'cars/urus.glb', name: 'Lamborghini Urus', desc: 'a grey Lamborghini Urus', vmax: 312, power: 1.2, eye: [-0.38, 1.38, -0.18], lamp: [0.66, 0.88, 2.38], ev: false, redline: 6800, cyl: 8 },
-    ypsilon: { file: 'cars/ypsilon.glb', name: 'Lancia Ypsilon', desc: 'a blue Lancia Ypsilon', vmax: 150, power: 0.9, eye: [-0.37, 1.22, -0.13], lamp: [0.58, 0.74, 1.93], ev: true },
-    delta: { file: 'cars/delta.glb', name: 'Lancia Delta Integrale', desc: 'a white Lancia Delta HF Integrale', vmax: 220, power: 1.0, eye: [-0.37, 1.16, -0.26], lamp: [0.48, 0.69, 1.85], ev: false, redline: 6500, cyl: 4 },
-    mc20: { file: 'cars/mc20.glb', name: 'Maserati MC20', desc: 'a blue Maserati MC20', vmax: 325, power: 1.25, eye: [-0.36, 1.01, -0.12], lamp: [0.63, 0.58, 2.26], ev: false, mid: true, redline: 8000, cyl: 6, doors: 'scissor' },
-    granturismo: { file: 'cars/granturismo.glb', name: 'Maserati GranTurismo', desc: 'a red Maserati GranTurismo', vmax: 320, power: 1.2, eye: [-0.37, 1.1, -0.32], lamp: [0.66, 0.66, 2.29], ev: false, redline: 7500, cyl: 6 },
-    grandepanda: { file: 'cars/grandepanda.glb', name: 'Fiat Grande Panda', desc: 'a white Fiat Grande Panda', vmax: 132, power: 0.8, eye: [-0.37, 1.3, -0.2], lamp: [0.56, 0.86, 1.91], ev: true },
-    utopia: { file: 'cars/utopia.glb', name: 'Pagani Utopia', desc: 'a silver Pagani Utopia', vmax: 350, power: 1.3, eye: [-0.36, 1.02, 0.04], lamp: [0.6, 0.58, 2.25], ev: false, mid: true, redline: 7000, cyl: 12, doors: 'gullwing' },
   };
   const CAR_IDS = Object.keys(CARS), CAR_ID = CARS[new URLSearchParams(location.search).get('car')] ? new URLSearchParams(location.search).get('car') : 'alfa33', CAR = CARS[CAR_ID];
   if (location.protocol === 'file:') { fail('This game has to be served over HTTP. In the repo folder run: python3 -m http.server 8000, then open http://localhost:8000'); return; }

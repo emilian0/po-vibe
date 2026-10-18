@@ -167,22 +167,6 @@
   // cars the viewer knows; choose with ?car=<id>. Each GLB follows the node-name API in CLAUDE.md.
   const CARS = {
     alfa33:   { file: 'cars/alfa33.glb',   name: 'Alfa Romeo 33', blurb: '1992 Series 2 hatchback.' },
-    fiat500e: { file: 'cars/fiat500e.glb', name: 'Fiat 500e',     blurb: '2020 electric three-door. The motor sits under the hood, the battery under the floor.' },
-    ferrari296: { file: 'cars/ferrari296.glb', name: 'Ferrari 296 GTB', blurb: '2022 mid-engined V6 hybrid. The engine shows under its glass cover; the front lid opens on the luggage bay.' },
-    ferrari12c: { file: 'cars/ferrari12c.glb', name: 'Ferrari 12Cilindri', blurb: '2024 front-mid V12 berlinetta. The long bonnet opens on the V12; the hatch on the luggage bay.' },
-    purosangue: { file: 'cars/purosangue.glb', name: 'Ferrari Purosangue', blurb: '2023 four-door V12. The rear doors are hinged at the back.', rearDoorsBackHinged: true },
-    giulia: { file: 'cars/giulia.glb', name: 'Alfa Giulia QV', blurb: '2016 Quadrifoglio saloon, front-engined 2.9 V6 twin-turbo.' },
-    stradale33: { file: 'cars/stradale33.glb', name: 'Alfa 33 Stradale', blurb: '2023 mid-engined V6 with butterfly doors.', doors: 'scissor' },
-    junior: { file: 'cars/junior.glb', name: 'Alfa Junior', blurb: '2024 electric compact crossover.' },
-    temerario: { file: 'cars/temerario.glb', name: 'Lamborghini Temerario', blurb: '2024 mid-engined V8 hybrid.' },
-    revuelto: { file: 'cars/revuelto.glb', name: 'Lamborghini Revuelto', blurb: '2023 mid-engined V12 hybrid with scissor doors.', doors: 'scissor' },
-    urus: { file: 'cars/urus.glb', name: 'Lamborghini Urus', blurb: '2024 SE: front-engined V8 hybrid SUV.' },
-    ypsilon: { file: 'cars/ypsilon.glb', name: 'Lancia Ypsilon', blurb: '2024 electric five-door hatchback.' },
-    delta: { file: 'cars/delta.glb', name: 'Lancia Delta Integrale', blurb: '1991 Evoluzione: turbo four, four-wheel drive.' },
-    mc20: { file: 'cars/mc20.glb', name: 'Maserati MC20', blurb: '2020 mid-engined V6 with butterfly doors.', doors: 'scissor' },
-    granturismo: { file: 'cars/granturismo.glb', name: 'Maserati GranTurismo', blurb: '2023 2+2 coupe, front-engined V6.' },
-    grandepanda: { file: 'cars/grandepanda.glb', name: 'Fiat Grande Panda', blurb: '2024 electric compact five-door.' },
-    utopia: { file: 'cars/utopia.glb', name: 'Pagani Utopia', blurb: '2022 mid-engined V12 with gullwing doors.', doors: 'gullwing' },
   };
   const CAR_ID = CARS[new URLSearchParams(location.search).get('car')] ? new URLSearchParams(location.search).get('car') : 'alfa33';
   const CAR = CARS[CAR_ID];

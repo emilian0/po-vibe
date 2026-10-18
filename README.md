@@ -12,18 +12,20 @@ This repository contains runtime files and actual binary assets, with no Git LFS
 Play: https://YOUR-USERNAME.github.io/po-vibe/
 Direct entry: https://YOUR-USERNAME.github.io/po-vibe/game/?spawn=dolomites
 Po circuit and car picker: https://YOUR-USERNAME.github.io/po-vibe/game/
-Credits: https://YOUR-USERNAME.github.io/po-vibe/credits.html
+Data sources and required attributions: [DATA_SOURCES.md](DATA_SOURCES.md)
 
 ## Local preview
 
 Run python3 -m http.server 8141 here, then visit http://localhost:8141/.
 WASD/arrows drive, Space handbrake, C camera, R reset, G look panel.
+On touch screens: left/right steering, gas, brake/reverse, handbrake, camera and reset.
+Landscape is recommended. Add &touch to the game URL to preview touch controls on desktop.
 
 ## Current limits
 
-The corridor still needs touch-driving controls and real-device mobile performance testing.
-Hosting this build does not make it mobile-ready. No analytics is configured.
-Libraries and fonts require internet access. The full asset collection is approximately 350 MB;
+Touch input and layouts are browser-tested; real-device mobile performance testing is still needed.
+No analytics is configured.
+Libraries and fonts require internet access. The Alfa-only asset collection is approximately 167 MB;
 a play session downloads only the assets it requests.
 
 release.json identifies the source revision. Make changes in the source repository and export

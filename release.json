@@ -1,4 +1,7 @@
 {
-  "sourceCommit": "5e8a3640fafaa999e965e583f42b166130e4d6fb",
-  "entrypoint": "game/?spawn=dolomites"
+  "sourceCommit": "e04a4b881b20f6dfa726524081720e620579d690",
+  "entrypoint": "game/?spawn=dolomites",
+  "cars": [
+    "alfa33"
+  ]
 }
