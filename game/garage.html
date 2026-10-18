@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Garage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --stage: #c9cfd2; --stage-hi: #e3e7e8; --ink: #1a2124; --muted: #56636a; --line: #8d999f;
+    --panel: rgba(240, 243, 244, 0.86); --chip: rgba(255, 255, 255, 0.7); --ok: #1f7a55; --warn: #a3501a;
+    --accent: #1f7a55; --accent-ink: #f2fbf6; --focus: #0d5bd7; --shadow: rgba(20, 30, 35, 0.16);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --stage: #1b2023; --stage-hi: #2c3337; --ink: #e5eaec; --muted: #9aa6ab; --line: #56636a;
+      --panel: rgba(30, 36, 39, 0.86); --chip: rgba(44, 51, 55, 0.8); --ok: #3fae7f; --warn: #e39a62;
+      --accent: #3fae7f; --accent-ink: #08150f; --focus: #7fb0ff; --shadow: rgba(0, 0, 0, 0.4); color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --stage: #1b2023; --stage-hi: #2c3337; --ink: #e5eaec; --muted: #9aa6ab; --line: #56636a;
+    --panel: rgba(30, 36, 39, 0.86); --chip: rgba(44, 51, 55, 0.8); --ok: #3fae7f; --warn: #e39a62;
+    --accent: #3fae7f; --accent-ink: #08150f; --focus: #7fb0ff; --shadow: rgba(0, 0, 0, 0.4); color-scheme: dark;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden; color: var(--ink);
+    font-family: "Barlow Semi Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+    background: radial-gradient(ellipse 80% 70% at 50% 58%, var(--stage-hi), var(--stage));
+  }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+  #stage.hot { cursor: pointer; }
+  button, a.btn { font-weight: 600; font-size: 14px; line-height: 1; font-family: inherit; color: var(--ink); }
+  button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  .title { position: fixed; left: max(20px, env(safe-area-inset-left, 0px)); top: calc(16px + env(safe-area-inset-top, 0px)); }
+  .title h1 { margin: 0; font-weight: 700; font-size: clamp(30px, 4.4vw, 50px); line-height: 0.95; letter-spacing: -0.01em; pointer-events: none; }
+  .title p { margin: 6px 0 0; font-size: 15px; color: var(--muted); max-width: 40ch; line-height: 1.35; pointer-events: none; }
+  .tools { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .tools button, .tools a {
+    background: var(--panel); border: 0; border-radius: 999px; padding: 9px 15px; cursor: pointer; text-decoration: none;
+    box-shadow: 0 4px 14px var(--shadow); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    font-weight: 600; font-size: 14px; line-height: 1; font-family: inherit; color: var(--ink);
+  }
+  .tools button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+  /* the focused car */
+  .panel {
+    position: fixed; right: max(20px, env(safe-area-inset-right, 0px)); top: calc(16px + env(safe-area-inset-top, 0px));
+    width: 260px; max-height: calc(100% - 150px); overflow: auto;
+    background: var(--panel); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-radius: 18px; padding: 16px; box-shadow: 0 8px 30px var(--shadow); display: grid; gap: 10px;
+  }
+  .panel[hidden] { display: none; }
+  .panel h2 { margin: 0; font-size: 24px; line-height: 1; }
+  .panel .blurb { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.35; }
+  .stats { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13.5px; margin: 0; }
+  .stats dt { color: var(--muted); }
+  .stats dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .checks { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+  .checks li { font-size: 12px; padding: 3px 7px; border-radius: 6px; background: var(--chip); }
+  .checks li.miss { color: var(--warn); text-decoration: line-through; }
+  .checks li.ok::before { content: "✓ "; color: var(--ok); }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .row button, .row a {
+    flex: 1 1 auto; text-align: center; background: transparent; border: 1.5px solid var(--line); border-radius: 999px;
+    padding: 8px 10px; cursor: pointer; text-decoration: none; font-weight: 600; font-size: 13.5px; line-height: 1; font-family: inherit; color: var(--ink);
+  }
+  .row button:hover, .row a:hover { border-color: var(--ink); }
+  .row button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  /* every car, as a strip of chips */
+  .strip {
+    position: fixed; left: 0; right: 0; bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    display: flex; gap: 6px; overflow-x: auto; padding: 4px max(16px, env(safe-area-inset-left, 0px)); scrollbar-width: thin;
+  }
+  .strip button {
+    flex: 0 0 auto; background: var(--chip); border: 0; border-radius: 10px; padding: 8px 11px; cursor: pointer;
+    box-shadow: 0 3px 10px var(--shadow); white-space: nowrap; font-size: 13.5px;
+  }
+  .strip button[aria-current="true"] { background: var(--accent); color: var(--accent-ink); }
+  .strip button.loading { opacity: 0.5; }
+  .strip button.warn::after { content: " •"; color: var(--warn); }
+
+  /* floating name tags over the cars */
+  .tags { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .tag {
+    position: absolute; transform: translate(-50%, -100%); white-space: nowrap; pointer-events: auto; cursor: pointer;
+    font-weight: 600; font-size: 13px; line-height: 1; font-family: inherit; color: var(--ink); background: var(--chip); border: 0;
+    padding: 5px 8px; border-radius: 8px; box-shadow: 0 2px 8px var(--shadow);
+  }
+  .tag[hidden] { display: none; }
+  .tag.cur { background: var(--accent); color: var(--accent-ink); }
+
+  .status { position: fixed; left: 50%; top: 50%; translate: -50% -50%; font-size: 17px; color: var(--muted); pointer-events: none; text-align: center; }
+  .status[hidden] { display: none; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (max-width: 700px) {
+    .title p { display: none; }
+    .panel { top: auto; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); left: 12px; right: 12px; width: auto; max-height: 45%; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage" aria-label="All cars parked in a showroom. Drag to look around, scroll or pinch to zoom, click a car to go to it."></canvas>
+<div class="tags" id="tags"></div>
+
+<header class="title">
+  <h1>Garage</h1>
+  <p>Every car on one floor. Click a car, or press ← and →, to go to it and check its parts. Open every door at once to check the hinges.</p>
+  <div class="tools">
+    <button id="overview" type="button">Overview</button>
+    <button id="doorsAll" type="button" aria-pressed="false">Open all doors</button>
+    <button id="spin" type="button" aria-pressed="false">Turntable</button>
+    <a href="./">Drive</a>
+  </div>
+</header>
+
+<aside class="panel" id="panel" hidden aria-live="polite">
+  <h2 id="pName"></h2>
+  <p class="blurb" id="pBlurb"></p>
+  <dl class="stats" id="pStats"></dl>
+  <ul class="checks" id="pChecks" aria-label="Parts the game and viewer need"></ul>
+  <div class="row">
+    <button id="pDoors" type="button" aria-pressed="false">Open doors</button>
+    <button id="pPrev" type="button" aria-label="Previous car">←</button>
+    <button id="pNext" type="button" aria-label="Next car">→</button>
+  </div>
+  <div class="row">
+    <a id="pViewer" href="#">Inspect in viewer</a>
+    <a id="pDrive" href="#">Drive it</a>
+  </div>
+</aside>
+
+<nav class="strip" id="strip" aria-label="Cars"></nav>
+<div class="status" id="status">Opening the garage…</div>
+<div class="sr" aria-live="polite" id="announce"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/babylonjs@9.29.0/babylon.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs-loaders@9.29.0/babylonjs.loaders.min.js"></script>
+<script>
+  // garage: every car in assets/cars on one floor, to compare them and check them quickly before a commit.
+  // Same list as the viewer (game/viewer.html); add new cars to both. ?cars=a,b limits the garage to those cars.
+  const ASSETS = new URL('../assets/', location.href), assetUrl = (p) => new URL(p, ASSETS).href;
+  const ALL = {
+    alfa33:      { name: 'Alfa Romeo 33', blurb: '1992 Series 2 hatchback.' },
+    fiat500e:    { name: 'Fiat 500e', blurb: '2020 electric three-door.' },
+    ferrari296:  { name: 'Ferrari 296 GTB', blurb: '2022 mid-engined V6 hybrid.', mid: true },
+    ferrari12c:  { name: 'Ferrari 12Cilindri', blurb: '2024 front-mid V12 berlinetta.' },
+    purosangue:  { name: 'Ferrari Purosangue', blurb: '2023 four-door V12; rear doors hinged at the back.', rearDoorsBackHinged: true },
+    giulia:      { name: 'Alfa Giulia QV', blurb: '2016 Quadrifoglio saloon, 2.9 V6 twin-turbo.' },
+    stradale33:  { name: 'Alfa 33 Stradale', blurb: '2023 mid-engined V6, butterfly doors.', doors: 'scissor', mid: true },
+    junior:      { name: 'Alfa Junior', blurb: '2024 electric compact crossover.' },
+    temerario:   { name: 'Lamborghini Temerario', blurb: '2024 mid-engined V8 hybrid.', mid: true },
+    revuelto:    { name: 'Lamborghini Revuelto', blurb: '2023 mid-engined V12 hybrid, scissor doors.', doors: 'scissor', mid: true },
+    urus:        { name: 'Lamborghini Urus', blurb: '2024 SE: V8 hybrid SUV.' },
+    ypsilon:     { name: 'Lancia Ypsilon', blurb: '2024 electric five-door.' },
+    delta:       { name: 'Lancia Delta Integrale', blurb: '1991 Evoluzione: turbo four, 4WD.' },
+    mc20:        { name: 'Maserati MC20', blurb: '2020 mid-engined V6, butterfly doors.', doors: 'scissor', mid: true },
+    granturismo: { name: 'Maserati GranTurismo', blurb: '2023 2+2 coupe, V6.' },
+    grandepanda: { name: 'Fiat Grande Panda', blurb: '2024 electric compact five-door.' },
+    utopia:      { name: 'Pagani Utopia', blurb: '2022 mid-engined V12, gullwing doors.', doors: 'gullwing', mid: true },
+  };
+  const only = (new URLSearchParams(location.search).get('cars') || '').split(',').filter((k) => ALL[k]);
+  const IDS = only.length ? only : Object.keys(ALL);
+  // parts every car must have (CLAUDE.md, node-name API); three-door cars have no rear doors
+  const REQUIRED = ['Body', 'Hood', 'Tailgate', 'Door_FL', 'Door_FR', 'Wheel_FL', 'Wheel_FR', 'Wheel_RL', 'Wheel_RR', 'Headlight_L', 'Headlight_R', 'SteeringWheel', 'EngineBay', 'Luggage'];
+
+(() => {
+  const $ = (id) => document.getElementById(id);
+  if (location.protocol === 'file:') {      // browsers refuse to load the car files from a page opened straight from disk
+    const st = $('status'); st.style.pointerEvents = 'auto'; st.style.maxWidth = '46ch'; st.style.lineHeight = '1.4';
+    st.innerHTML = 'The garage has to be opened through the local server, because browsers block loading the cars from a file on disk.<br><br>Double-click <b>Garage.command</b> in the repo folder, or run <code>python3 tools/serve.py</code> there and go to <b>localhost:8137/game/garage.html</b>.';
+    return;
+  }
+  const statusEl = $('status'), say = (t) => { $('announce').textContent = t; };
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  window.addEventListener('error', (e) => { statusEl.hidden = false; statusEl.textContent = 'Something went wrong: ' + (e.message || 'unknown error'); });
+
+  const canvas = $('stage');
+  const engine = new BABYLON.Engine(canvas, true, { stencil: false, preserveDrawingBuffer: true }, true);
+  engine.setHardwareScalingLevel(1 / Math.min(window.devicePixelRatio || 1, 1.5));
+  const scene = new BABYLON.Scene(engine);
+  scene.skipPointerMovePicking = true;
+  scene.clearColor = new BABYLON.Color4(0.62, 0.64, 0.66, 1);
+  const ip = scene.imageProcessingConfiguration;
+  ip.toneMappingEnabled = true; ip.toneMappingType = BABYLON.ImageProcessingConfiguration.TONEMAPPING_ACES; ip.exposure = 1.05; ip.contrast = 1.12;
+  const hemi = new BABYLON.HemisphericLight('fill', new BABYLON.Vector3(0.2, 1, 0.3), scene); hemi.intensity = 0;
+  try {
+    const env = BABYLON.CubeTexture.CreateFromPrefilteredData(assetUrl('sky/studio.env'), scene, '.env');
+    env.rotationY = 0.4; scene.environmentTexture = env; scene.environmentIntensity = 0.85;
+    setTimeout(() => { if (!env.isReady()) { scene.environmentTexture = null; hemi.intensity = 1.1; } }, 8000);
+  } catch (e) { hemi.intensity = 1.1; }
+
+  // layout: rows of cars side by side, all facing the camera; a soft shadow pad under each
+  const COLS = Math.min(6, IDS.length), DX = 3.0, DZ = 7.5, rows = Math.ceil(IDS.length / COLS);
+  const slot = (i) => new BABYLON.Vector3(((COLS - 1) / 2 - (i % COLS)) * DX,     // first car on the left as seen from the front
+                                          0, -Math.floor(i / COLS) * DZ);
+  const centre = new BABYLON.Vector3(0, 0.6, -(rows - 1) * DZ / 2);
+  const floor = BABYLON.MeshBuilder.CreateGround('floor', { width: 400, height: 400 }, scene);
+  floor.position.z = centre.z; floor.isPickable = false;
+  const fm = new BABYLON.PBRMaterial('floorMat', scene); fm.albedoColor = new BABYLON.Color3(0.36, 0.37, 0.38); fm.metallic = 0; fm.roughness = 0.85; floor.material = fm;
+  const shadowTex = new BABYLON.DynamicTexture('pad', 128, scene, true);
+  { const g = shadowTex.getContext(), r = g.createRadialGradient(64, 64, 8, 64, 64, 64);
+    r.addColorStop(0, 'rgba(0,0,0,0.55)'); r.addColorStop(0.6, 'rgba(0,0,0,0.3)'); r.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 128, 128); shadowTex.hasAlpha = true; shadowTex.update(); }
+  const padMat = new BABYLON.StandardMaterial('padMat', scene);
+  padMat.diffuseTexture = shadowTex; padMat.useAlphaFromDiffuseTexture = true; padMat.disableLighting = true; padMat.emissiveColor = BABYLON.Color3.Black(); padMat.zOffset = -2;
+
+  const camera = new BABYLON.ArcRotateCamera('cam', Math.PI / 2 - 0.55, 1.08, Math.max(18, COLS * DX * 1.25), centre.clone(), scene);
+  camera.fov = 0.62; camera.minZ = 0.05; camera.maxZ = 400;
+  camera.lowerRadiusLimit = 3; camera.upperRadiusLimit = 80; camera.lowerBetaLimit = 0.15; camera.upperBetaLimit = 1.52;
+  camera.wheelDeltaPercentage = 0.015; camera.pinchDeltaPercentage = 0.015; camera.panningSensibility = 400;
+  camera.inertia = 0.85; camera.attachControl(canvas, true);
+  const overviewView = { target: centre.clone(), radius: camera.radius, alpha: camera.alpha, beta: camera.beta };
+
+  // ---------- cars ----------
+  const D = Math.PI / 180;
+  const cars = {};             // id -> { node, parts, tris, missing, tag, chip }
+  const partsFor = (meta) => {
+    const P = {
+      Hood:     { axis: BABYLON.Axis.X, angle: -52 * D, dur: 1.1 }, Tailgate: { axis: BABYLON.Axis.X, angle: 74 * D, dur: 1.2 },
+      Door_FL:  { axis: BABYLON.Axis.Y, angle: -66 * D, dur: 0.9 }, Door_FR:  { axis: BABYLON.Axis.Y, angle: 66 * D, dur: 0.9 },
+      Door_RL:  { axis: BABYLON.Axis.Y, angle: -62 * D, dur: 0.9 }, Door_RR:  { axis: BABYLON.Axis.Y, angle: 62 * D, dur: 0.9 },
+    };
+    if (meta.rearDoorsBackHinged) { P.Door_RL.angle *= -1; P.Door_RR.angle *= -1; }
+    if (meta.doors === 'scissor') for (const k of ['Door_FL', 'Door_FR']) Object.assign(P[k], { axis: BABYLON.Axis.X, angle: 70 * D });
+    if (meta.doors === 'gullwing') { Object.assign(P.Door_FL, { axis: BABYLON.Axis.Z, angle: -80 * D }); Object.assign(P.Door_FR, { axis: BABYLON.Axis.Z, angle: 80 * D }); }
+    return P;
+  };
+  const ease = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+  const tmpQ = new BABYLON.Quaternion();
+  scene.onBeforeRenderObservable.add(() => {
+    const dt = Math.min(engine.getDeltaTime() / 1000, 0.05);
+    for (const id in cars) {
+      const c = cars[id];
+      if (spinning && c.loaded) c.node.rotation.y += dt * 0.35;
+      for (const k in c.parts) {
+        const p = c.parts[k]; const goal = c.open ? 1 : 0;
+        if (p.t === goal) continue;
+        p.t = reduceMotion ? goal : goal > p.t ? Math.min(1, p.t + dt / p.dur) : Math.max(0, p.t - dt / p.dur);
+        BABYLON.Quaternion.RotationAxisToRef(p.axis, p.angle * ease(p.t), tmpQ);
+        p.rest.multiplyToRef(tmpQ, p.node.rotationQuaternion);
+      }
+    }
+  });
+
+  const strip = $('strip'), tags = $('tags');
+  IDS.forEach((id, i) => {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = ALL[id].name; b.className = 'loading';
+    b.addEventListener('click', () => focusCar(id)); strip.appendChild(b);
+    const t = document.createElement('button'); t.type = 'button'; t.className = 'tag'; t.textContent = ALL[id].name; t.hidden = true; t.tabIndex = -1;
+    t.addEventListener('click', () => focusCar(id)); tags.appendChild(t);
+    cars[id] = { i, node: null, parts: {}, open: false, chip: b, tag: t, tris: 0, missing: [], bytes: 0, loaded: false, still: [] };
+  });
+
+  // meshes that never move are frozen (much cheaper with 17 cars); the turntable thaws them while it turns
+  const freeze = (c, on) => { c.node.computeWorldMatrix(true); for (const m of c.still) { if (on) { m.computeWorldMatrix(true); m.freezeWorldMatrix(); } else m.unfreezeWorldMatrix(); } };
+  const load = async (id) => {
+    const c = cars[id], url = assetUrl('cars/' + id + '.glb');
+    const res = await fetch(url); if (!res.ok) throw new Error(id + ': ' + res.status);
+    const buf = await res.arrayBuffer(); c.bytes = buf.byteLength;
+    const r = await BABYLON.SceneLoader.ImportMeshAsync(null, '', new Uint8Array(buf), scene, null, '.glb');
+    const root = r.meshes[0];
+    const node = new BABYLON.TransformNode('car_' + id, scene); root.parent = node; c.node = node;
+    const find = (n) => r.transformNodes.find((t) => t.name === n) || r.meshes.find((m) => m.name === n);
+    c.missing = REQUIRED.filter((n) => !find(n));
+    c.fourDoor = !!find('Door_RL');
+    // turn the car to face +Z (towards the camera), from its wheel positions
+    node.computeWorldMatrix(true); root.computeWorldMatrix(true);
+    const w = (k) => { const n = find('Wheel_' + k); if (!n) return null; n.computeWorldMatrix(true); return n.getAbsolutePosition(); };
+    const fl = w('FL'), rl = w('RL');
+    if (fl && rl) node.rotation.y = -Math.atan2(fl.x - rl.x, fl.z - rl.z);
+    node.position.copyFrom(slot(c.i)); c.baseYaw = node.rotation.y;
+    // shadow pad sized to the car
+    const bb = root.getHierarchyBoundingVectors(true), len = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+    const pad = BABYLON.MeshBuilder.CreateGround('pad_' + id, { width: 2.6, height: len + 0.9 }, scene);
+    pad.material = padMat; pad.position.y = 0.004; pad.parent = node; pad.isPickable = false;
+    c.len = len;
+    const meta = ALL[id], defs = partsFor(meta);
+    for (const k in defs) {
+      const n = find(k); if (!n) continue;
+      if (!n.rotationQuaternion) n.rotationQuaternion = BABYLON.Quaternion.FromEulerVector(n.rotation);
+      c.parts[k] = Object.assign(defs[k], { node: n, rest: n.rotationQuaternion.clone(), t: 0 });
+    }
+    // speed: freeze everything that never moves; tag meshes with their car for picking
+    const moving = new Set(Object.values(c.parts).map((p) => p.node));
+    const movesWith = (m) => { for (let n = m; n; n = n.parent) if (moving.has(n)) return true; return false; };
+    for (const m of r.meshes) {
+      m.metadata = Object.assign(m.metadata || {}, { car: id });
+      m.alwaysSelectAsActiveMesh = false;
+      if (m.getTotalIndices) c.tris += (m.getTotalIndices() || 0) / 3;
+      if (!movesWith(m)) c.still.push(m);
+    }
+    freeze(c, true);
+    c.loaded = true; c.chip.classList.remove('loading');
+    if (c.missing.length) c.chip.classList.add('warn');
+    c.tag.hidden = false;
+    if (c === cars[current]) showPanel(current);
+  };
+
+  // load a few at a time; the strip shows progress
+  let done = 0, failed = [];
+  const queue = IDS.slice(), next = async () => {
+    while (queue.length) {
+      const id = queue.shift();
+      try { await load(id); } catch (e) { failed.push(id); cars[id].chip.classList.add('warn'); console.error(e); }
+      done++; statusEl.textContent = `Parking cars… ${done} of ${IDS.length}`;
+    }
+  };
+  Promise.all([next(), next(), next()]).then(() => {
+    statusEl.hidden = !failed.length;
+    if (failed.length) statusEl.textContent = 'Could not load: ' + failed.join(', ');
+    // a car that stops spinning or opening still renders frozen meshes correctly; freeze materials once all are ready
+    scene.executeWhenReady(() => { for (const m of scene.materials) if (m !== padMat && m !== fm) m.freeze(); });
+    say('All cars are parked');
+    document.body.dataset.ready = '1';
+  });
+
+  // ---------- camera moves ----------
+  let anim = null;
+  const fly = (to) => {
+    const from = { target: camera.target.clone(), radius: camera.radius, alpha: camera.alpha, beta: camera.beta };
+    let da = to.alpha - from.alpha; da = Math.atan2(Math.sin(da), Math.cos(da));
+    const start = performance.now(), dur = reduceMotion ? 1 : 900;
+    if (anim) scene.onBeforeRenderObservable.remove(anim);
+    anim = scene.onBeforeRenderObservable.add(() => {
+      const k = Math.min(1, (performance.now() - start) / dur), e = 1 - Math.pow(1 - k, 3);
+      camera.setTarget(BABYLON.Vector3.Lerp(from.target, to.target, e));
+      camera.radius = from.radius + (to.radius - from.radius) * e;
+      camera.alpha = from.alpha + da * e; camera.beta = from.beta + (to.beta - from.beta) * e;
+      if (k >= 1) { scene.onBeforeRenderObservable.remove(anim); anim = null; }
+    });
+  };
+
+  let current = null;
+  const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + ' M' : Math.round(n / 1e3) + ' k';
+  const showPanel = (id) => {
+    const c = cars[id], meta = ALL[id];
+    $('panel').hidden = false;
+    $('pName').textContent = meta.name; $('pBlurb').textContent = meta.blurb;
+    $('pViewer').href = 'viewer.html?car=' + id; $('pDrive').href = './?car=' + id;
+    $('pDoors').setAttribute('aria-pressed', String(c.open)); $('pDoors').textContent = c.open ? 'Close doors' : 'Open doors';
+    const st = $('pStats'); st.innerHTML = '';
+    const add = (k, v) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = v; st.append(dt, dd); };
+    if (!c.loaded) { add('Status', 'loading…'); $('pChecks').innerHTML = ''; return; }
+    add('Triangles', fmt(c.tris)); add('File', (c.bytes / 1048576).toFixed(1) + ' MB'); add('Length', c.len.toFixed(2) + ' m');
+    add('Doors', (c.fourDoor ? 'four' : 'two') + (meta.doors ? ', ' + meta.doors : '') + (meta.rearDoorsBackHinged ? ', rear hinged at back' : ''));
+    const ul = $('pChecks'); ul.innerHTML = '';
+    for (const n of REQUIRED) { const li = document.createElement('li'); li.textContent = n; li.className = c.missing.includes(n) ? 'miss' : 'ok'; ul.appendChild(li); }
+  };
+  const focusCar = (id) => {
+    if (current) { cars[current].chip.removeAttribute('aria-current'); cars[current].tag.classList.remove('cur'); }
+    current = id; const c = cars[id];
+    c.chip.setAttribute('aria-current', 'true'); c.tag.classList.add('cur'); c.chip.scrollIntoView({ block: 'nearest', inline: 'center', behavior: reduceMotion ? 'auto' : 'smooth' });
+    const p = slot(c.i);
+    fly({ target: new BABYLON.Vector3(p.x, 0.6, p.z), radius: 8.6, alpha: Math.PI / 2 - 0.75, beta: 1.2 });
+    camera.targetScreenOffset.x = window.innerWidth > 700 ? -1.3 : 0;      // keep the car clear of the panel
+    showPanel(id); say(ALL[id].name);
+  };
+  const step = (d) => focusCar(IDS[((current ? IDS.indexOf(current) : -1) + d + IDS.length) % IDS.length]);
+
+  $('overview').addEventListener('click', () => {
+    if (current) { cars[current].chip.removeAttribute('aria-current'); cars[current].tag.classList.remove('cur'); }
+    current = null; $('panel').hidden = true; fly(overviewView); camera.targetScreenOffset.x = 0;
+  });
+  let allOpen = false, spinning = false;
+  $('doorsAll').addEventListener('click', (e) => {
+    allOpen = !allOpen; for (const id in cars) cars[id].open = allOpen;
+    e.currentTarget.setAttribute('aria-pressed', String(allOpen)); e.currentTarget.textContent = allOpen ? 'Close all doors' : 'Open all doors';
+    if (current) showPanel(current); say(allOpen ? 'All doors open' : 'All doors closed');
+  });
+  $('spin').addEventListener('click', (e) => {
+    spinning = !spinning; e.currentTarget.setAttribute('aria-pressed', String(spinning));
+    for (const id in cars) { const c = cars[id]; if (!c.loaded) continue; if (!spinning) c.node.rotation.y = c.baseYaw; freeze(c, !spinning); }
+  });
+  $('pDoors').addEventListener('click', () => { const c = cars[current]; c.open = !c.open; showPanel(current); });
+  $('pPrev').addEventListener('click', () => step(-1));
+  $('pNext').addEventListener('click', () => step(1));
+  window.addEventListener('keydown', (e) => {
+    if (e.target.closest && e.target.closest('input, select, textarea')) return;
+    if (e.key === 'ArrowRight') { step(1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { step(-1); e.preventDefault(); }
+    else if (e.key === 'Escape') $('overview').click();
+    else if ((e.key === 'o' || e.key === 'O') && current) $('pDoors').click();
+  });
+
+  // click a car to go to it (drags orbit the camera)
+  scene.onPointerObservable.add((pi) => {
+    if (pi.type !== BABYLON.PointerEventTypes.POINTERTAP) return;
+    const hit = scene.pick(scene.pointerX, scene.pointerY, (m) => m.isPickable && m.isEnabled() && m.metadata && m.metadata.car);
+    if (hit && hit.hit) { const id = hit.pickedMesh.metadata.car; if (id === current) { cars[id].open = !cars[id].open; showPanel(id); } else focusCar(id); }
+  });
+
+  // name tags follow the cars
+  const tagPos = new BABYLON.Vector3(), vp = new BABYLON.Viewport(0, 0, 1, 1);
+  scene.onAfterRenderObservable.add(() => {
+    const w = engine.getRenderWidth(), h = engine.getRenderHeight(), s = engine.getHardwareScalingLevel();
+    const tm = scene.getTransformMatrix(), id4 = BABYLON.Matrix.IdentityReadOnly;
+    for (const id in cars) {
+      const c = cars[id]; if (!c.loaded) continue;
+      tagPos.copyFrom(c.node.position); tagPos.y = 1.75;
+      const p = BABYLON.Vector3.Project(tagPos, id4, tm, vp.toGlobal(w, h));
+      const behind = p.z > 1 || p.z < 0, far = BABYLON.Vector3.Distance(camera.position, tagPos) > 45;
+      c.tag.hidden = behind || (far && id !== current);
+      if (!c.tag.hidden) c.tag.style.transform = `translate(${(p.x * s).toFixed(1)}px, ${(p.y * s).toFixed(1)}px) translate(-50%, -100%)`;
+    }
+  });
+  document.querySelectorAll('.tag').forEach((t) => { t.style.left = '0'; t.style.top = '0'; });
+
+  engine.runRenderLoop(() => scene.render());
+  window.addEventListener('resize', () => engine.resize());
+  window.__garage = { cars, focusCar, scene };
+})();
+</script>
+</body>
+</html>

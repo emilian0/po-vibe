@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Car viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --stage: #c9cfd2;
+    --stage-hi: #e3e7e8;
+    --ink: #1a2124;
+    --muted: #56636a;
+    --line: #8d999f;
+    --panel: rgba(240, 243, 244, 0.82);
+    --lamp-off: #b9c2c6;
+    --lamp-on: #1f7a55;
+    --lamp-on-ink: #f2fbf6;
+    --focus: #0d5bd7;
+    --shadow: rgba(20, 30, 35, 0.16);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --stage: #1b2023; --stage-hi: #2c3337; --ink: #e5eaec; --muted: #9aa6ab; --line: #56636a;
+      --panel: rgba(30, 36, 39, 0.82); --lamp-off: #3a4448; --lamp-on: #3fae7f; --lamp-on-ink: #08150f;
+      --focus: #7fb0ff; --shadow: rgba(0, 0, 0, 0.4); color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --stage: #1b2023; --stage-hi: #2c3337; --ink: #e5eaec; --muted: #9aa6ab; --line: #56636a;
+    --panel: rgba(30, 36, 39, 0.82); --lamp-off: #3a4448; --lamp-on: #3fae7f; --lamp-on-ink: #08150f;
+    --focus: #7fb0ff; --shadow: rgba(0, 0, 0, 0.4); color-scheme: dark;
+  }
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  *, *::before, *::after { box-sizing: inherit; }
+  html { height: 100%; scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body {
+    margin: 0; height: 100%; overflow: hidden; color: var(--ink);
+    font-family: "Barlow Semi Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+    background: radial-gradient(ellipse 80% 70% at 50% 58%, var(--stage-hi), var(--stage));
+  }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+  #stage.hot { cursor: pointer; }
+
+  .title { position: fixed; left: max(20px, env(safe-area-inset-left, 0px)); top: calc(18px + env(safe-area-inset-top, 0px)); pointer-events: none; }
+  .title h1 { margin: 0; font-weight: 700; font-size: clamp(30px, 4.4vw, 52px); line-height: 0.95; letter-spacing: -0.01em; }
+  .title p { margin: 6px 0 0; font-size: 15px; color: var(--muted); max-width: 34ch; line-height: 1.35; }
+  .title nav { margin-top: 8px; font-size: 14px; pointer-events: auto; display: flex; gap: 12px; flex-wrap: wrap; }
+  .title nav select { font: inherit; font-size: 15px; padding: 6px 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,0.2); background: rgba(255,255,255,0.85); color: inherit; }
+
+  .panel {
+    position: fixed; right: max(20px, env(safe-area-inset-right, 0px)); top: 50%; transform: translateY(-50%);
+    background: var(--panel); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-radius: 18px; padding: 16px 14px 14px; box-shadow: 0 8px 30px var(--shadow);
+    display: grid; gap: 12px; justify-items: center; width: 196px;
+  }
+  .panel h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; }
+  /* top-down car: front at the top, its left side on the left */
+  .car {
+    display: grid; grid-template-columns: 54px 44px 54px; grid-template-rows: 46px 62px 62px 40px;
+    grid-template-areas: "hood hood hood" "fl cab fr" "rl cab rr" "tail tail tail";
+    gap: 4px; padding: 6px; border: 2px solid var(--line); border-radius: 46px 46px 22px 22px;
+  }
+  .cab { grid-area: cab; border-radius: 10px; border: 1.5px dashed var(--line); opacity: 0.6; }
+  .p {
+    font: 600 12px/1.05 inherit; font-family: inherit; color: var(--ink); background: var(--lamp-off);
+    border: 0; border-radius: 8px; padding: 4px; cursor: pointer; transition: background-color .25s, color .25s;
+    display: grid; place-items: center; text-align: center;
+  }
+  .p[aria-pressed="true"] { background: var(--lamp-on); color: var(--lamp-on-ink); }
+  .p:hover { filter: brightness(1.06); }
+  .p:focus-visible, .all button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .hood { grid-area: hood; border-radius: 36px 36px 8px 8px; }
+  .fl { grid-area: fl; } .fr { grid-area: fr; } .rl { grid-area: rl; } .rr { grid-area: rr; }
+  .tail { grid-area: tail; border-radius: 8px 8px 16px 16px; }
+  .lamps { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; width: 100%; }
+  .lamp { font: 600 11.5px/1.1 inherit; font-family: inherit; color: var(--ink); background: var(--lamp-off); border: 0; border-radius: 8px; padding: 7px 2px; cursor: pointer; }
+  .lamp[aria-pressed="true"] { background: var(--lamp-on); color: var(--lamp-on-ink); }
+  .lamp:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .gi { width: 100%; }
+  .all { display: flex; gap: 6px; width: 100%; }
+  .all button {
+    flex: 1; font: 600 13px/1 inherit; font-family: inherit; color: var(--ink); background: transparent;
+    border: 1.5px solid var(--line); border-radius: 999px; padding: 8px 0; cursor: pointer;
+  }
+  .all button:hover { border-color: var(--ink); }
+  .resetbtn { font: 600 12px/1 inherit; font-family: inherit; color: var(--muted); background: none; border: 0; text-decoration: underline; cursor: pointer; padding: 2px; }
+  .resetbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .hint { margin: 0; font-size: 12.5px; color: var(--muted); text-align: center; line-height: 1.3; }
+
+  .status { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; font-size: 17px; color: var(--muted); }
+  .status[hidden] { display: none; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  .ptoggle {
+    position: fixed; right: max(20px, env(safe-area-inset-right, 0px)); top: calc(18px + env(safe-area-inset-top, 0px));
+    font: 600 14px/1 inherit; font-family: inherit; color: var(--ink); background: var(--panel); border: 0; border-radius: 999px;
+    padding: 10px 18px; cursor: pointer; box-shadow: 0 6px 20px var(--shadow); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  }
+  .ptoggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .panel:not(.open) { display: none; }
+  body.collapsed .title p { display: none; }
+  @media (max-width: 640px) {
+    .title p { display: none; }
+    .ptoggle { top: auto; right: 50%; translate: 50% 0; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); font-size: 15px; padding: 12px 22px; }
+    .ptoggle[aria-expanded="true"] { bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--panel-h, 230px)); }
+
+    .panel {
+      top: auto; transform: none; right: 50%; translate: 50% 0; bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+      grid-template-columns: auto auto; align-items: center; width: auto; padding: 10px 12px; gap: 10px 14px;
+    }
+    .panel h2, .hint, .resetbtn { display: none; }
+    .car { grid-template-columns: 44px 30px 44px; grid-template-rows: 34px 46px 46px 30px; border-radius: 34px 34px 16px 16px; }
+    .p { font-size: 10.5px; }
+    .all { flex-direction: column; width: 96px; }
+    .lamps { grid-column: 1 / -1; }
+  }
+  @media (prefers-reduced-motion: reduce) { .p { transition: none; } }
+</style>
+</head>
+<body>
+<canvas id="stage" aria-label="3D model of a car. Drag to orbit, scroll or pinch to zoom, click a door, the hood or the tailgate to open it."></canvas>
+
+<header class="title">
+  <h1 id="carName">Car</h1>
+  <p><span id="carBlurb"></span> Tap doors, lids and lamps. Drag a window to lower it, a front wheel to steer, or the body to bounce the suspension. Drag the background to look around.</p>
+  <nav id="carNav" aria-label="Choose a car"></nav>
+</header>
+
+<button id="panelToggle" class="ptoggle" type="button" aria-expanded="false" aria-controls="panel">Controls</button>
+<aside class="panel" id="panel" aria-label="Doors and lids">
+  <h2>Doors and lids</h2>
+  <div class="car" role="group" aria-label="Open or close each part">
+    <button class="p hood" data-part="Hood" aria-pressed="false">Hood</button>
+    <button class="p fl" data-part="Door_FL" aria-pressed="false" aria-label="Front left door">Front left</button>
+    <span class="cab" aria-hidden="true"></span>
+    <button class="p fr" data-part="Door_FR" aria-pressed="false" aria-label="Front right door">Front right</button>
+    <button class="p rl" data-part="Door_RL" aria-pressed="false" aria-label="Rear left door">Rear left</button>
+    <button class="p rr" data-part="Door_RR" aria-pressed="false" aria-label="Rear right door">Rear right</button>
+    <button class="p tail" data-part="Tailgate" aria-pressed="false">Tailgate</button>
+  </div>
+  <div class="lamps" role="group" aria-label="Lights">
+    <button class="lamp" data-lamp="head" aria-pressed="false">Headlights</button>
+    <button class="lamp" data-lamp="tail" aria-pressed="false">Tail lights</button>
+    <button class="lamp" data-lamp="hazard" aria-pressed="false">Hazards</button>
+  </div>
+  <button id="giToggle" class="lamp gi" type="button" aria-pressed="false">Environment shadows (slower)</button>
+  <div class="all">
+    <button id="openAll" type="button">Open all</button>
+    <button id="closeAll" type="button">Close all</button>
+  </div>
+  <p class="hint">Green means open or on.</p>
+  <button id="reset" type="button" class="resetbtn">Reset windows and steering</button>
+</aside>
+
+<div class="status" id="status">Preparing the car…</div>
+<div class="sr" aria-live="polite" id="announce"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/cannon@0.6.2/build/cannon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs@9.29.0/babylon.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs-loaders@9.29.0/babylonjs.loaders.min.js"></script>
+<script>
+  const ASSETS = new URL('../assets/', location.href), assetUrl = (p) => new URL(p, ASSETS).href;   // car viewer: inspect and test the car on its own
+  // cars the viewer knows; choose with ?car=<id>. Each GLB follows the node-name API in CLAUDE.md.
+  const CARS = {
+    alfa33:   { file: 'cars/alfa33.glb',   name: 'Alfa Romeo 33', blurb: '1992 Series 2 hatchback.' },
+    fiat500e: { file: 'cars/fiat500e.glb', name: 'Fiat 500e',     blurb: '2020 electric three-door. The motor sits under the hood, the battery under the floor.' },
+    ferrari296: { file: 'cars/ferrari296.glb', name: 'Ferrari 296 GTB', blurb: '2022 mid-engined V6 hybrid. The engine shows under its glass cover; the front lid opens on the luggage bay.' },
+    ferrari12c: { file: 'cars/ferrari12c.glb', name: 'Ferrari 12Cilindri', blurb: '2024 front-mid V12 berlinetta. The long bonnet opens on the V12; the hatch on the luggage bay.' },
+    purosangue: { file: 'cars/purosangue.glb', name: 'Ferrari Purosangue', blurb: '2023 four-door V12. The rear doors are hinged at the back.', rearDoorsBackHinged: true },
+    giulia: { file: 'cars/giulia.glb', name: 'Alfa Giulia QV', blurb: '2016 Quadrifoglio saloon, front-engined 2.9 V6 twin-turbo.' },
+    stradale33: { file: 'cars/stradale33.glb', name: 'Alfa 33 Stradale', blurb: '2023 mid-engined V6 with butterfly doors.', doors: 'scissor' },
+    junior: { file: 'cars/junior.glb', name: 'Alfa Junior', blurb: '2024 electric compact crossover.' },
+    temerario: { file: 'cars/temerario.glb', name: 'Lamborghini Temerario', blurb: '2024 mid-engined V8 hybrid.' },
+    revuelto: { file: 'cars/revuelto.glb', name: 'Lamborghini Revuelto', blurb: '2023 mid-engined V12 hybrid with scissor doors.', doors: 'scissor' },
+    urus: { file: 'cars/urus.glb', name: 'Lamborghini Urus', blurb: '2024 SE: front-engined V8 hybrid SUV.' },
+    ypsilon: { file: 'cars/ypsilon.glb', name: 'Lancia Ypsilon', blurb: '2024 electric five-door hatchback.' },
+    delta: { file: 'cars/delta.glb', name: 'Lancia Delta Integrale', blurb: '1991 Evoluzione: turbo four, four-wheel drive.' },
+    mc20: { file: 'cars/mc20.glb', name: 'Maserati MC20', blurb: '2020 mid-engined V6 with butterfly doors.', doors: 'scissor' },
+    granturismo: { file: 'cars/granturismo.glb', name: 'Maserati GranTurismo', blurb: '2023 2+2 coupe, front-engined V6.' },
+    grandepanda: { file: 'cars/grandepanda.glb', name: 'Fiat Grande Panda', blurb: '2024 electric compact five-door.' },
+    utopia: { file: 'cars/utopia.glb', name: 'Pagani Utopia', blurb: '2022 mid-engined V12 with gullwing doors.', doors: 'gullwing' },
+  };
+  const CAR_ID = CARS[new URLSearchParams(location.search).get('car')] ? new URLSearchParams(location.search).get('car') : 'alfa33';
+  const CAR = CARS[CAR_ID];
+(() => {
+  document.title = CAR.name + ', interactive model';
+  document.getElementById('carName').textContent = CAR.name;
+  document.getElementById('carBlurb').textContent = CAR.blurb;
+  document.getElementById('stage').setAttribute('aria-label', `3D model of a ${CAR.name}. Drag to orbit, scroll or pinch to zoom, click a door, the hood or the tailgate to open it.`);
+  const nav = document.getElementById('carNav');                        // a drop-down: the garage has outgrown a row of links
+  const pick = document.createElement('select'); pick.setAttribute('aria-label', 'Choose a car');
+  for (const id in CARS) { const o = document.createElement('option'); o.value = id; o.textContent = CARS[id].name; if (id === CAR_ID) o.selected = true; pick.appendChild(o); }
+  pick.addEventListener('change', () => { location.search = '?car=' + pick.value; });
+  nav.appendChild(pick);
+  const toGarage = document.createElement('a'); toGarage.href = 'garage.html'; toGarage.textContent = 'All cars'; nav.appendChild(toGarage);
+  const statusEl = document.getElementById('status');
+  const ptog = document.getElementById('panelToggle'), panelEl = document.getElementById('panel');
+  const setPanel = (open) => {
+    panelEl.classList.toggle('open', open); document.body.classList.toggle('collapsed', !open);
+    ptog.setAttribute('aria-expanded', String(open)); ptog.textContent = open ? 'Hide controls' : 'Controls';
+    if (open) document.documentElement.style.setProperty('--panel-h', (panelEl.offsetHeight + 10) + 'px');
+  };
+  ptog.addEventListener('click', () => setPanel(!panelEl.classList.contains('open')));
+  setPanel(!(window.matchMedia('(max-width: 640px)').matches));
+  const announceEl = document.getElementById('announce');
+  const say = (t) => { announceEl.textContent = t; };
+  const fail = (t) => { statusEl.hidden = false; statusEl.textContent = t; };
+
+  if (typeof BABYLON === 'undefined') { fail('The 3D engine did not load. Check your connection and reload the page.'); return; }
+  if (!BABYLON.Engine.isSupported()) { fail('This page needs WebGL to show the 3D model. Try a recent Chrome, Safari or Firefox.'); return; }
+
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const isMobile = window.matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700;
+  window.addEventListener('error', (e) => fail('Something went wrong while showing the car: ' + (e.message || 'unknown error')));
+  window.addEventListener('unhandledrejection', (e) => fail('Something went wrong while loading the car: ' + ((e.reason && e.reason.message) || e.reason || 'unknown error')));
+
+  // ---------- data helpers ----------
+  const b64ToBytes = (s) => {
+    const bin = atob(s.trim()); const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  };
+  const bytesToB64 = (u8) => {
+    let s = ''; const CH = 0x8000;
+    for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+    return btoa(s);
+  };
+
+  // Embedded textures are decoded through blob: URLs. If the page policy blocks those,
+  // hand the engine data: URLs instead (built synchronously from the bytes we already hold).
+  const blobImagesWork = () => new Promise((resolve) => {
+    try {
+      const png = b64ToBytes('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+      const url = URL.createObjectURL(new Blob([png], { type: 'image/png' }));
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(true); };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(false); };
+      img.src = url;
+      setTimeout(() => resolve(false), 1500);
+    } catch (e) { resolve(false); }
+  });
+  const useDataUrlsForBlobs = () => {
+    const NativeBlob = window.Blob;
+    function TrackedBlob(parts, opts) {
+      const b = new NativeBlob(parts, opts);
+      try { Object.defineProperty(b, '__parts', { value: parts }); Object.defineProperty(b, '__type', { value: (opts && opts.type) || '' }); } catch (e) {}
+      return b;
+    }
+    TrackedBlob.prototype = NativeBlob.prototype;
+    window.Blob = TrackedBlob;
+    const nativeCreate = URL.createObjectURL.bind(URL), nativeRevoke = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = (obj) => {
+      const parts = obj && obj.__parts;
+      if (parts && parts.length === 1) {
+        const p = parts[0];
+        const u8 = p instanceof ArrayBuffer ? new Uint8Array(p) : ArrayBuffer.isView(p) ? new Uint8Array(p.buffer, p.byteOffset, p.byteLength) : null;
+        if (u8) return 'data:' + (obj.__type || 'application/octet-stream') + ';base64,' + bytesToB64(u8);
+      }
+      return nativeCreate(obj);
+    };
+    URL.revokeObjectURL = (u) => { if (typeof u === 'string' && u.startsWith('data:')) return; nativeRevoke(u); };
+  };
+
+  // ---------- parts that open ----------
+  const D = Math.PI / 180;
+  const PARTS = {
+    Hood:     { axis: BABYLON.Axis.X, angle: -52 * D, label: 'Hood', dur: 1.1 },
+    Door_FL:  { axis: BABYLON.Axis.Y, angle: -66 * D, label: 'Front left door', dur: 0.9 },
+    Door_FR:  { axis: BABYLON.Axis.Y, angle:  66 * D, label: 'Front right door', dur: 0.9 },
+    Door_RL:  { axis: BABYLON.Axis.Y, angle: -62 * D, label: 'Rear left door', dur: 0.9 },
+    Door_RR:  { axis: BABYLON.Axis.Y, angle:  62 * D, label: 'Rear right door', dur: 0.9 },
+    Tailgate: { axis: BABYLON.Axis.X, angle:  74 * D, label: 'Tailgate', dur: 1.2 },
+  };
+  if (CAR.rearDoorsBackHinged) { PARTS.Door_RL.angle *= -1; PARTS.Door_RR.angle *= -1; }      // rear-hinged rear doors swing the other way
+  if (CAR.doors === 'scissor') for (const k of ['Door_FL', 'Door_FR']) Object.assign(PARTS[k], { axis: BABYLON.Axis.X, angle: 70 * D });   // scissor / butterfly doors swing up
+  if (CAR.doors === 'gullwing') { Object.assign(PARTS.Door_FL, { axis: BABYLON.Axis.Z, angle: -80 * D }); Object.assign(PARTS.Door_FR, { axis: BABYLON.Axis.Z, angle: 80 * D }); }
+  for (const k in PARTS) Object.assign(PARTS[k], { open: false, t: 0, node: null, meshes: [] });
+  const buttons = {};
+  document.querySelectorAll('.p[data-part]').forEach((b) => { buttons[b.dataset.part] = b; });
+
+  // the IBL shadows pipeline samples a blue-noise texture that Babylon normally fetches from its CDN; serve an embedded one instead
+  const noiseUrl = assetUrl('textures/blue_noise.png');
+  const getAssetUrl = BABYLON.Tools.GetAssetUrl.bind(BABYLON.Tools);
+  BABYLON.Tools.GetAssetUrl = (u) => (typeof u === 'string' && u.indexOf('blue_noise') >= 0) ? noiseUrl : getAssetUrl(u);
+  const canvas = document.getElementById('stage');
+  const engine = new BABYLON.Engine(canvas, true, { stencil: true, preserveDrawingBuffer: false, premultipliedAlpha: false }, true);
+  const scene = new BABYLON.Scene(engine);
+  engine.onContextLostObservable.add(() => fail('The graphics memory ran out on this device. Close other tabs or apps and reload.'));
+  // render at the screen's real pixel density (capped at 2.5x to keep the frame rate up)
+  engine.setHardwareScalingLevel(1 / Math.min(window.devicePixelRatio || 1, 2.5));
+  scene.skipPointerMovePicking = true;
+
+  const ip = scene.imageProcessingConfiguration;
+  ip.toneMappingEnabled = true;
+  ip.toneMappingType = BABYLON.ImageProcessingConfiguration.TONEMAPPING_ACES;
+  ip.exposure = 1.05; ip.contrast = 1.12;
+
+  const target = new BABYLON.Vector3(0, 0.62, 0);
+  const camera = new BABYLON.ArcRotateCamera('cam', 2.25, 1.18, reduceMotion ? 8.6 : 11.5, target, scene);
+  camera.fov = 0.62; camera.minZ = 0.05; camera.maxZ = 100;
+  camera.lowerRadiusLimit = 3.2; camera.upperRadiusLimit = 16;
+  camera.lowerBetaLimit = 0.15; camera.upperBetaLimit = 1.52;
+  camera.wheelDeltaPercentage = 0.012; camera.pinchDeltaPercentage = 0.012;
+  camera.panningSensibility = 0; camera.useNaturalPinchZoom = true;
+  camera.inertia = 0.88; camera.angularSensibilityX = camera.angularSensibilityY = 900;
+  camera.attachControl(canvas, true);
+  const fitCamera = () => {
+    const portrait = engine.getRenderWidth() < engine.getRenderHeight();
+    camera.fovMode = portrait ? BABYLON.Camera.FOVMODE_HORIZONTAL_FIXED : BABYLON.Camera.FOVMODE_VERTICAL_FIXED;
+    camera.fov = portrait ? 0.64 : 0.62;
+  };
+  fitCamera();
+
+  // studio lighting: prefiltered studio environment (assets/sky/studio.env)
+  const hemi = new BABYLON.HemisphericLight('fallbackLight', new BABYLON.Vector3(0.2, 1, 0.3), scene);
+  hemi.intensity = 0;
+  const envUrl = assetUrl('sky/studio.env');
+  let env = null;
+  const dropEnv = () => { if (scene.environmentTexture) { scene.environmentTexture = null; } hemi.intensity = 1.1; };
+  try {
+    env = BABYLON.CubeTexture.CreateFromPrefilteredData(envUrl, scene, '.env');
+    env.rotationY = 0.4;
+    scene.environmentTexture = env;
+    scene.environmentIntensity = 0.85;
+    setTimeout(() => { if (!env.isReady()) dropEnv(); }, 8000);
+  } catch (e) { dropEnv(); }
+
+  // studio floor; shadows and occlusion come from Babylon's IBL shadows pipeline (set up once the car is loaded)
+  scene.clearColor = new BABYLON.Color4(0.62, 0.64, 0.66, 1);
+  const ground = BABYLON.MeshBuilder.CreateGround('floor', { width: 60, height: 60, subdivisions: 60 }, scene);
+  ground.isPickable = false;
+  const gm = new BABYLON.PBRMaterial('floorMat', scene);
+  gm.albedoColor = new BABYLON.Color3(0.36, 0.37, 0.38); gm.metallic = 0; gm.roughness = 0.85;
+  ground.material = gm;
+  let skybox = null;
+  try { if (env) { skybox = scene.createDefaultSkybox(env, true, 400, 0.45); skybox.isPickable = false; } } catch (e) {}
+  const hl = isMobile ? { addMesh() {}, removeMesh() {} } : new BABYLON.HighlightLayer('hl', scene, { blurHorizontalSize: 0.7, blurVerticalSize: 0.7 });
+  hl.innerGlow = false;
+  const hlColor = () => BABYLON.Color3.FromHexString(getComputedStyle(document.documentElement).getPropertyValue('--lamp-on').trim() || '#1f7a55');
+
+  const LAMPS = {
+    head:   { mats: ['Lens_Head', 'Bulb_Head'], color: new BABYLON.Color3(1, 0.93, 0.8), k: [1.2, 6], label: 'Headlights', on: false, meshes: [] },
+    tail:   { mats: ['Lens_Red', 'Bulb_Tail'], color: new BABYLON.Color3(1, 0.06, 0.03), k: [1.6, 4], label: 'Tail lights', on: false, meshes: [] },
+    hazard: { mats: ['Lens_Amber', 'Bulb_Amber'], color: new BABYLON.Color3(1, 0.42, 0.02), k: [2.0, 5], label: 'Hazard lights', on: false, meshes: [] },
+  };
+  const lampOf = (mesh) => {
+    for (let n = mesh; n; n = n.parent) {
+      if (/Amber|^Indicator_/.test(n.name)) return 'hazard';
+      if (/^Headlight_/.test(n.name)) return 'head';
+      if (/^Taillight_/.test(n.name)) return 'tail';
+    }
+    return null;
+  };
+  const partOf = (mesh) => { for (let n = mesh; n; n = n.parent) if (PARTS[n.name]) return n.name; return null; };
+  const WINDOWS = ['Door_FL_Glass', 'Door_FR_Glass', 'Door_RL_Glass', 'Door_RR_Glass'];
+  const targetOf = (mesh) => {
+    for (let n = mesh; n; n = n.parent) {
+      if (WINDOWS.includes(n.name)) return 'window:' + n.name;
+      if (n.name === 'Wheel_FL' || n.name === 'Wheel_FR') return 'steer:front';
+    }
+    const l = lampOf(mesh); if (l) return 'lamp:' + l;
+    const p = partOf(mesh); return p ? 'part:' + p : null;
+  };
+  const nodeMeshes = (name) => { const n = scene.getTransformNodeByName(name) || scene.getMeshByName(name); return n ? n.getChildMeshes(false).concat(n.getClassName() === 'Mesh' ? [n] : []) : []; };
+  const meshesOf = (t) => {
+    if (t.startsWith('lamp:')) return LAMPS[t.slice(5)].meshes;
+    if (t.startsWith('window:')) return nodeMeshes(t.slice(7));
+    if (t.startsWith('steer:')) return nodeMeshes('Wheel_FL').concat(nodeMeshes('Wheel_FR'));
+    return PARTS[t.slice(5)].meshes;
+  };
+  const lampButtons = {};
+  document.querySelectorAll('.lamp[data-lamp]').forEach((b) => { lampButtons[b.dataset.lamp] = b; });
+  let glow = null, spots = [], gaugeMats = [];
+  const setLampEmission = (key, lit) => {
+    const L = LAMPS[key];
+    scene.materials.forEach((m) => {
+      const i = L.mats.indexOf(m.name); if (i < 0) return;
+      m.emissiveColor = lit ? L.color : BABYLON.Color3.Black(); m.emissiveIntensity = lit ? L.k[i] : 0;
+    });
+  };
+  const setLamp = (key, on) => {
+    const L = LAMPS[key]; if (L.on === on) return;
+    L.on = on; lampButtons[key].setAttribute('aria-pressed', String(on));
+    if (glow) glow.isEnabled = Object.values(LAMPS).some((x) => x.on);
+    if (key !== 'hazard') setLampEmission(key, on);
+    if (key === 'head') {
+      spots.forEach((s) => { s.intensity = on ? 45 : 0; });
+      gaugeMats.forEach((m) => { m.emissiveTexture = on ? m.albedoTexture : null; m.emissiveColor = on ? new BABYLON.Color3(1, 0.7, 0.4) : BABYLON.Color3.Black(); });
+    }
+    if (key === 'hazard' && !on) setLampEmission('hazard', false);
+    say(`${L.label} ${on ? 'on' : 'off'}`);
+  };
+  for (const k in lampButtons) lampButtons[k].addEventListener('click', () => setLamp(k, !LAMPS[k].on));
+  let blinkState = false;
+  scene.onBeforeRenderObservable.add(() => {
+    if (!LAMPS.hazard.on) return;
+    const b = (performance.now() / 1000 * 1.5) % 1 < 0.5;
+    if (b !== blinkState) { blinkState = b; setLampEmission('hazard', b); }
+  });
+
+  const ease = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+  const setPart = (name, open, quiet) => {
+    const p = PARTS[name]; if (!p || !p.node || p.open === open) return;
+    p.open = open; buttons[name].setAttribute('aria-pressed', String(open));
+    if (reduceMotion) p.t = open ? 1 : 0;
+    if (!quiet) say(`${p.label} ${open ? 'opened' : 'closed'}`);
+  };
+  const togglePart = (name) => setPart(name, !PARTS[name].open);
+
+  scene.onBeforeRenderObservable.add(() => {
+    const dt = Math.min(engine.getDeltaTime() / 1000, 0.05);
+    for (const k in PARTS) {
+      const p = PARTS[k]; if (!p.node) continue;
+      const goal = p.open ? 1 : 0;
+      if (p.t !== goal) { p.t = goal > p.t ? Math.min(1, p.t + dt / p.dur) : Math.max(0, p.t - dt / p.dur); if (p.t === goal) refreshGI(); }
+      const a = p.angle * ease(p.t);
+      if (p._a !== a) { p._a = a; BABYLON.Quaternion.RotationAxisToRef(p.axis, a, p.node.rotationQuaternion); }
+    }
+  });
+
+  // pointer: hover glow on desktop, tap/click toggles
+  let hovered = null, lastMove = 0;
+  const setHover = (t) => {
+    if (t === hovered) return;
+    if (hovered) meshesOf(hovered).forEach((m) => hl.removeMesh(m));
+    hovered = t;
+    if (t) { const c = hlColor(); meshesOf(t).forEach((m) => hl.addMesh(m, c)); }
+    canvas.classList.toggle('hot', !!t);
+  };
+  const pickPart = () => {
+    const hit = scene.pick(scene.pointerX, scene.pointerY, (m) => m.isPickable && m.isEnabled() && m.isVisible);
+    return hit && hit.hit ? targetOf(hit.pickedMesh) : null;
+  };
+  scene.onPointerObservable.add((pi) => {
+    if (pi.type === BABYLON.PointerEventTypes.POINTERMOVE) {
+      if (pi.event.pointerType !== 'mouse') return;
+      const now = performance.now(); if (now - lastMove < 70) return; lastMove = now;
+      setHover(pickPart());
+    } else if (pi.type === BABYLON.PointerEventTypes.POINTERTAP) {
+      const t = pickPart(); if (!t) return;
+      if (t.startsWith('lamp:')) { const k = t.slice(5); setLamp(k, !LAMPS[k].on); }
+      else if (t.startsWith('window:')) togglePart(t.slice(7).replace('_Glass', ''));
+      else if (t.startsWith('part:')) togglePart(t.slice(5));
+    }
+  });
+  canvas.addEventListener('pointerleave', () => setHover(null));
+
+  for (const name in buttons) {
+    buttons[name].addEventListener('click', () => togglePart(name));
+    buttons[name].addEventListener('mouseenter', () => setHover('part:' + name));
+    buttons[name].addEventListener('mouseleave', () => setHover(null));
+  }
+  document.getElementById('openAll').addEventListener('click', () => { for (const k in PARTS) setPart(k, true, true); say('All doors and lids opened'); });
+  document.getElementById('closeAll').addEventListener('click', () => { for (const k in PARTS) setPart(k, false, true); say('All doors and lids closed'); });
+
+  // a single entrance move: the camera settles in once the car is ready
+  const settle = () => {
+    if (reduceMotion) return;
+    const from = camera.radius, to = 8.6, a0 = camera.alpha, a1 = 2.45, start = performance.now();
+    const step = () => {
+      const k = Math.min(1, (performance.now() - start) / 1600), e = 1 - Math.pow(1 - k, 3);
+      camera.radius = from + (to - from) * e; camera.alpha = a0 + (a1 - a0) * e;
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
+
+  // ---------- shadows ----------
+  // Default: a soft directional shadow map. It is redrawn every frame, so it follows the car exactly and costs little.
+  // Optional: Babylon's IBL shadows (environment-light shadows/occlusion). Heavier; refreshed only when the car stops moving.
+  let ibl = null, revox = null, sun = null, sg = null;
+  const carMeshes = () => scene.meshes.filter((m) => rig && m.isDescendantOf(rig) && m.getTotalVertices() > 0 && m.isEnabled());
+  const setupShadowMap = () => {
+    sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-0.2, -1, -0.25), scene);
+    sun.position = new BABYLON.Vector3(3, 10, 4); sun.intensity = 0.9;
+    sun.autoCalcShadowZBounds = true;
+    sg = new BABYLON.ShadowGenerator(isMobile ? 1024 : 2048, sun);
+    if (isMobile) { sg.usePercentageCloserFiltering = true; sg.filteringQuality = BABYLON.ShadowGenerator.QUALITY_MEDIUM; }
+    else { sg.useContactHardeningShadow = true; sg.contactHardeningLightSizeUVRatio = 0.06; sg.filteringQuality = BABYLON.ShadowGenerator.QUALITY_HIGH; }
+    sg.bias = 0.0008; sg.normalBias = 0.01; sg.darkness = 0.35; sg.transparencyShadow = true;
+    carMeshes().forEach((m) => sg.addShadowCaster(m, false));
+    ground.receiveShadows = true;
+  };
+  const enableIBLShadows = (on) => {
+    if (on && !ibl) {
+      try {
+        if (!BABYLON.IblShadowsRenderPipeline || !scene.environmentTexture) throw new Error('no IBL');
+        ibl = new BABYLON.IblShadowsRenderPipeline('iblShadows', scene, { resolutionExp: isMobile ? 6 : 7, sampleDirections: 2,
+          ssShadowsEnabled: false, shadowRemanence: 0.9, triPlanarVoxelization: true, shadowOpacity: 0.85 }, [camera]);
+        if (ibl.isSupported === false) throw new Error('IBL shadows unsupported');
+        ibl.addShadowCastingMesh(carMeshes());
+        ibl.addShadowReceivingMaterial(scene.materials.filter((m) => !skybox || m !== skybox.material));
+        ibl.updateSceneBounds(); ibl.updateVoxelization();
+        if (sun) sun.shadowEnabled = false;
+        return true;
+      } catch (e) {
+        console.warn('IBL shadows unavailable', e);
+        if (ibl) { try { ibl.dispose(); } catch (_) {} ibl = null; }
+        return false;
+      }
+    }
+    if (!on && ibl) { try { ibl.dispose(); } catch (_) {} ibl = null; if (sun) sun.shadowEnabled = true; }
+    return on;
+  };
+  const refreshGI = () => { if (!ibl) return; clearTimeout(revox); revox = setTimeout(() => { try { ibl.updateVoxelization(); } catch (e) {} }, 350); };
+  // with IBL shadows on, re-voxelize once the car has come to rest after moving (never every frame)
+  let lastSig = '', settleTimer = null;
+  const motionSig = () => {
+    if (!rig) return '';
+    const p = rig.position, q = rig.rotationQuaternion;
+    let sig = [p.x, p.y, p.z, q.x, q.y, q.z].map((v) => Math.round(v * 300)).join(',');
+    for (const k in PARTS) sig += ',' + Math.round(PARTS[k].t * 40);
+    for (const k in windowState) sig += ',' + Math.round(windowState[k].off * 100);
+    return sig + ',' + Math.round(steer * 60);
+  };
+  scene.onAfterRenderObservable.add(() => {
+    if (!ibl) return;
+    const sig = motionSig();
+    if (sig !== lastSig) { lastSig = sig; refreshGI(); }
+  });
+
+  // ---------- articulation + physics (Babylon physics engine with the cannon.js plugin) ----------
+  let rig = null, chassis = null, vehicle = null, world = null, eq = null, wheels = [], struts = {}, arms = {};
+  let steerNodes = [], steerWheel = null, steerWheelRest = null, steer = 0, WR = 0.288;
+  const windowState = {};
+  const setupRig = () => {
+    const root = scene.getMeshByName('__root__') || scene.getTransformNodeByName('__root__');
+    rig = new BABYLON.TransformNode('rig', scene); rig.rotationQuaternion = BABYLON.Quaternion.Identity();
+    root.parent = rig;
+    for (const w of WINDOWS) { const n = scene.getTransformNodeByName(w) || scene.getMeshByName(w); if (n) windowState[w] = { node: n, rest: n.position.y, restX: n.position.x, side: Math.sign((n.parent && n.parent.position.x) || 1), off: 0 }; }
+    steerWheel = scene.getTransformNodeByName('SteeringWheel');
+    if (steerWheel) { if (!steerWheel.rotationQuaternion) steerWheel.rotationQuaternion = BABYLON.Quaternion.Identity(); steerWheelRest = steerWheel.rotationQuaternion.clone(); }
+    for (const k of ['FL', 'FR', 'RL', 'RR']) {
+      const n = scene.getTransformNodeByName('Wheel_' + k); if (!n) continue;
+      if (!n.rotationQuaternion) n.rotationQuaternion = BABYLON.Quaternion.Identity();
+      n.computeWorldMatrix(true);
+      wheels.push({ key: k, node: n, restY: n.position.y, world: n.getAbsolutePosition().clone() });
+      if (k[0] === 'F') steerNodes.push(n);
+      const st = scene.getTransformNodeByName('Strut_' + k); if (st) struts[k] = st;
+      const ar = scene.getTransformNodeByName('Arm_' + k); if (ar) { if (!ar.rotationQuaternion) ar.rotationQuaternion = BABYLON.Quaternion.Identity(); arms[k] = ar; }
+    }
+    if (typeof CANNON === 'undefined' || wheels.length !== 4) return;      // articulation still works without physics
+    try {
+      scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), new BABYLON.CannonJSPlugin(true, 10, CANNON));
+      world = scene.getPhysicsEngine().getPhysicsPlugin().world;
+    } catch (e) { console.warn('physics unavailable', e); return; }
+    const ground = new CANNON.Body({ mass: 0 }); ground.addShape(new CANNON.Plane());
+    ground.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2); world.addBody(ground);
+    // sizes come from the model: wheel radius = wheel-centre height at rest, box from the track and the body length
+    WR = Math.max(0.2, wheels[0].world.y);
+    const bb = root.getHierarchyBoundingVectors(true);
+    const halfX = Math.max(...wheels.map((w) => Math.abs(w.world.x))) + 0.04, halfZ = (bb.max.z - bb.min.z) / 2 - 0.1;
+    chassis = new CANNON.Body({ mass: 1000 });
+    chassis.addShape(new CANNON.Box(new CANNON.Vec3(halfX, 0.25, halfZ)), new CANNON.Vec3(0, 0.05, 0));
+    chassis.position.set(0, 0.60, 0); chassis.angularDamping = 0.02; chassis.linearDamping = 0.01;
+    world.addBody(chassis);
+    vehicle = new CANNON.RaycastVehicle({ chassisBody: chassis, indexRightAxis: 0, indexUpAxis: 1, indexForwardAxis: 2 });
+    for (const w of wheels) {
+      w.r = Math.max(0.2, w.world.y);                  // staggered tyres keep their own radius
+      vehicle.addWheel({ radius: w.r, directionLocal: new CANNON.Vec3(0, -1, 0), suspensionStiffness: 38, suspensionRestLength: 0.30,
+        frictionSlip: 5, dampingRelaxation: 1.0, dampingCompression: 1.4, maxSuspensionForce: 200000, rollInfluence: 0.01,
+        axleLocal: new CANNON.Vec3(1, 0, 0), maxSuspensionTravel: 0.16, chassisConnectionPointLocal: new CANNON.Vec3(w.world.x, -0.06 + (w.r - WR), w.world.z),
+        customSlidingRotationalSpeed: -30, useCustomSlidingRotationalSpeed: true });
+    }
+    vehicle.addToWorld(world);
+    for (let i = 0; i < 4; i++) vehicle.setBrake(1000, i);
+    // the car bounces in place: no sliding, no yaw
+    world.addEventListener('postStep', () => {
+      chassis.velocity.x = chassis.velocity.z = 0; chassis.position.x = chassis.position.z = 0; chassis.angularVelocity.y = 0;
+    });
+    world.addEventListener('preStep', () => {
+      if (!push) return;
+      const wp = chassis.pointToWorldFrame(push.local);
+      chassis.applyForce(new CANNON.Vec3(0, push.force, 0), wp);
+    });
+    for (let i = 0; i < 420; i++) world.step(1 / 60);          // settle to the static ride height
+    chassis.velocity.set(0, 0, 0); chassis.angularVelocity.set(0, 0, 0);
+    // bump stops: tyre-sized spheres that meet the ground after 7 cm of extra compression, so nothing sinks through
+    for (const w of wheels) chassis.addShape(new CANNON.Sphere(w.r), new CANNON.Vec3(w.world.x, w.r + 0.07 - chassis.position.y, w.world.z));
+    chassis.updateMassProperties();
+    eq = { pos: new BABYLON.Vector3(chassis.position.x, chassis.position.y, chassis.position.z),
+           len: vehicle.wheelInfos.map((w) => w.suspensionLength) };
+  };
+  let push = null, manualStep = false, lastPhysT = -1, framesNoAdvance = 0;
+  scene.onBeforeRenderObservable.add(() => {
+    if (world && eq) {
+      if (manualStep) world.step(1 / 60, Math.min(engine.getDeltaTime() / 1000, 0.05), 3);
+      if (world.time === lastPhysT) { if (++framesNoAdvance > 10) manualStep = true; } else framesNoAdvance = 0;
+      lastPhysT = world.time;
+      const q = new BABYLON.Quaternion(chassis.quaternion.x, chassis.quaternion.y, chassis.quaternion.z, chassis.quaternion.w);
+      const c = new BABYLON.Vector3(chassis.position.x, chassis.position.y, chassis.position.z);
+      rig.rotationQuaternion.copyFrom(q);
+      rig.position.copyFrom(c.subtract(eq.pos.applyRotationQuaternion(q)));
+      rig.computeWorldMatrix(true);
+      wheels.forEach((w, i) => {
+        vehicle.updateWheelTransform(i);
+        const wp = vehicle.wheelInfos[i].worldTransform.position;
+        if (wp.y < w.r) wp.y = w.r;        // the tyre never goes through the floor, even at full bump
+        const par = w.node.parent; par.computeWorldMatrix(true);
+        const local = BABYLON.Vector3.TransformCoordinates(new BABYLON.Vector3(wp.x, wp.y, wp.z), par.getWorldMatrix().clone().invert());
+        w.node.position.y = local.y;
+        const comp = local.y - w.restY;
+        if (struts[w.key]) struts[w.key].scaling.y = Math.max(0.55, 1 - comp / 0.26);
+        if (arms[w.key]) BABYLON.Quaternion.RotationAxisToRef(BABYLON.Axis.Z, Math.atan2(comp, 0.33) * Math.sign(arms[w.key].position.x || 1), arms[w.key].rotationQuaternion);
+      });
+    }
+    steerNodes.forEach((n) => BABYLON.Quaternion.RotationAxisToRef(BABYLON.Axis.Y, steer, n.rotationQuaternion));
+    if (steerWheel) steerWheel.rotationQuaternion.copyFrom(steerWheelRest.multiply(BABYLON.Quaternion.RotationAxis(BABYLON.Axis.X, steer * 13)));
+  });
+
+  // drag gestures: window glass, front wheels, car body. Background drags orbit the camera.
+  let drag = null;
+  const startDrag = (pi) => {
+    const hit = scene.pick(scene.pointerX, scene.pointerY, (m) => m.isPickable && m.isEnabled() && m.isVisible);
+    if (!hit || !hit.hit || !rig || !hit.pickedMesh.isDescendantOf(rig)) return;
+    const t = targetOf(hit.pickedMesh);
+    const kind = t && t.startsWith('window:') ? 'window' : t === 'steer:front' ? 'steer' : 'push';
+    drag = { kind, t, x: scene.pointerX, y: scene.pointerY, active: false, point: hit.pickedPoint.clone(),
+             start: kind === 'window' ? windowState[t.slice(7)].off : steer };
+    camera.detachControl();
+  };
+  const moveDrag = () => {
+    if (!drag) return;
+    const dx = scene.pointerX - drag.x, dy = scene.pointerY - drag.y;
+    if (!drag.active && Math.hypot(dx, dy) < 6) return;
+    drag.active = true;
+    if (drag.kind === 'window') {
+      const w = windowState[drag.t.slice(7)];
+      w.off = Math.max(-0.40, Math.min(0, drag.start - dy * 0.0028)); w.node.position.y = w.rest + w.off; w.node.position.x = w.restX - w.side * 0.42 * w.off;   // slide along the pane's own tilted plane
+    } else if (drag.kind === 'steer') {
+      steer = Math.max(-0.55, Math.min(0.55, drag.start + dx * 0.005));
+    } else if (chassis) {
+      if (!push) push = { local: chassis.pointToLocalFrame(new CANNON.Vec3(drag.point.x, drag.point.y, drag.point.z)), force: 0 };
+      push.force = Math.max(-9000, Math.min(4000, dy * 90));
+      push.force = -push.force;            // dragging down pushes the body down
+    }
+  };
+  const endDrag = () => {
+    if (!drag) return;
+    if (drag.active && drag.kind === 'window') { const w = windowState[drag.t.slice(7)]; say(`Window ${w.off < -0.02 ? 'lowered' : 'raised'}`); }
+    if (drag.active && drag.kind === 'steer') say('Front wheels turned');
+    if (drag.active && drag.kind !== 'push') refreshGI();
+    drag = null; push = null; camera.attachControl(canvas, true);
+  };
+  scene.onPointerObservable.add((pi) => {
+    if (pi.type === BABYLON.PointerEventTypes.POINTERDOWN && pi.event.button === 0) startDrag(pi);
+    else if (pi.type === BABYLON.PointerEventTypes.POINTERMOVE) moveDrag();
+    else if (pi.type === BABYLON.PointerEventTypes.POINTERUP) endDrag();
+  });
+  const giBtn = document.getElementById('giToggle');
+  giBtn.addEventListener('click', () => {
+    const want = giBtn.getAttribute('aria-pressed') !== 'true';
+    const ok = enableIBLShadows(want);
+    giBtn.setAttribute('aria-pressed', String(want && ok));
+    say(want && ok ? 'Environment shadows on' : want ? 'Environment shadows are not supported on this device' : 'Environment shadows off');
+  });
+  document.getElementById('reset').addEventListener('click', () => {
+    for (const k in windowState) { const w = windowState[k]; w.off = 0; w.node.position.y = w.rest; w.node.position.x = w.restX; } refreshGI();
+    steer = 0; say('Windows raised and wheels straight');
+  });
+
+  // The model arrives as ~700 small meshes; phones choke on that many draw calls per pass.
+  // Merge everything that moves together and shares a material, keeping every articulated node intact.
+  const MOVERS = /^(Door_(FL|FR|RL|RR)(_Glass)?|Hood|Tailgate|Wheel_(FL|FR|RL|RR)|Strut_(FL|FR|RL|RR)|Arm_(FL|FR|RL|RR)|SteeringWheel)$/;
+  const LAMPNODE = /^(Headlight_|Taillight_|Indicator_)/;
+  const mergeForSpeed = () => {
+    const before = scene.meshes.length, groups = new Map();
+    for (const m of scene.meshes.slice()) {
+      if (!m.material || !m.getTotalVertices || m.getTotalVertices() === 0 || m.name === '__root__') continue;
+      if (!m.getVerticesDataKinds || (m.instances && m.instances.length)) continue;     // instanced meshes (shared by gltfpack) stay as they are
+      let owner = 'static', skip = false;
+      for (let n = m.parent; n; n = n.parent) {
+        if (LAMPNODE.test(n.name)) { skip = true; break; }
+        if (MOVERS.test(n.name)) { owner = n.name; break; }
+      }
+      if (skip) continue;
+      const key = owner + '|' + m.material.uniqueId + '|' + m.getVerticesDataKinds().sort().join(',') + '|' + (m.getIndices().length > 65535 ? 32 : 16);
+      if (!groups.has(key)) groups.set(key, { owner, list: [] });
+      groups.get(key).list.push(m);
+    }
+    let merged = 0;
+    for (const { owner, list } of groups.values()) {
+      if (list.length < 2) continue;
+      try {
+        list.forEach((m) => m.computeWorldMatrix(true));
+        const mm = BABYLON.Mesh.MergeMeshes(list, true, true);
+        if (!mm) continue;
+        mm.name = (owner === 'static' ? 'Static' : owner) + '_merged';
+        const par = owner === 'static' ? (scene.getMeshByName('__root__') || scene.getTransformNodeByName('__root__')) : scene.getTransformNodeByName(owner) || scene.getMeshByName(owner);
+        if (par) mm.setParent(par);
+        merged += list.length;
+      } catch (e) { console.warn('merge skipped', owner, e); }
+    }
+    console.log('meshes before', before, 'after', scene.meshes.length, 'merged', merged);
+  };
+
+  const load = async () => {
+    if (!(await blobImagesWork())) useDataUrlsForBlobs();
+    const res = await fetch(assetUrl(CAR.file)); if (!res.ok) throw new Error('could not load assets/' + CAR.file + ' (' + res.status + ')');
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (BABYLON.ImportMeshAsync) await BABYLON.ImportMeshAsync(bytes, scene, { pluginExtension: '.glb' });
+    else await BABYLON.SceneLoader.ImportMeshAsync('', '', new File([bytes], 'car.glb'), scene);
+    mergeForSpeed();
+    for (const name in PARTS) {
+      const node = scene.getTransformNodeByName(name) || scene.getMeshByName(name);
+      if (!node) { if (buttons[name]) buttons[name].style.visibility = 'hidden'; continue; }      // e.g. a three-door car has no rear doors
+      if (!node.rotationQuaternion) node.rotationQuaternion = BABYLON.Quaternion.Identity();
+      PARTS[name].node = node;
+      PARTS[name].meshes = node.getChildMeshes(false).concat(node.getClassName && node.getClassName() === 'Mesh' ? [node] : []);
+    }
+    scene.transformNodes.concat(scene.meshes).forEach((n) => {
+      const l = lampOf(n); if (!l || !n.getClassName || n.getClassName() !== 'Mesh') return;
+      if (!LAMPS[l].meshes.includes(n)) LAMPS[l].meshes.push(n);
+    });
+    gaugeMats = scene.materials.filter((m) => m.name === 'Gauge' || m.name === 'GaugeRZ');
+    for (const k in LAMPS) setLampEmission(k, false);
+    glow = new BABYLON.GlowLayer('glow', scene, { mainTextureSamples: isMobile ? 1 : 4, blurKernelSize: 32, mainTextureRatio: 0.5 });
+    glow.intensity = 0.75; glow.isEnabled = false;
+    for (const side of ['Headlight_L', 'Headlight_R']) {
+      const n = scene.getTransformNodeByName(side); if (!n) continue;
+      n.computeWorldMatrix(true);
+      const sp = new BABYLON.SpotLight('beam_' + side, n.getAbsolutePosition().clone(), new BABYLON.Vector3(0, -0.16, 1).normalize(), 0.95, 2, scene);
+      sp.diffuse = new BABYLON.Color3(1, 0.94, 0.82); sp.intensity = 0; sp.range = 30; spots.push(sp);
+    }
+    setupRig();
+    setupShadowMap();
+    const tr = scene._transmissionHelper; if (tr && tr.setOptions) tr.setOptions({ renderSize: isMobile ? 512 : 1024 });
+    statusEl.hidden = true;
+    settle();
+  };
+
+  load().catch((e) => { console.error(e); fail('The model could not be loaded. Reload the page to try again.'); });
+
+  engine.runRenderLoop(() => scene.render());
+  window.addEventListener('resize', () => { engine.resize(); fitCamera(); });
+})();
+</script>
+</body>
+</html>

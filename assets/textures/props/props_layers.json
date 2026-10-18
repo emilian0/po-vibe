@@ -1,0 +1,44 @@
+{
+ "size": 1024,
+ "layers": [
+  "WoodSiding013",
+  "Planks037A",
+  "Plaster003",
+  "Bricks089",
+  "WoodSiding012",
+  "Metal062C"
+ ],
+ "linear_mean_albedo": {
+  "WoodSiding013": [
+   0.1167,
+   0.0844,
+   0.0497
+  ],
+  "Planks037A": [
+   0.0777,
+   0.0438,
+   0.0231
+  ],
+  "Plaster003": [
+   0.6931,
+   0.6695,
+   0.6477
+  ],
+  "Bricks089": [
+   0.2097,
+   0.1784,
+   0.0922
+  ],
+  "WoodSiding012": [
+   0.0437,
+   0.0361,
+   0.0224
+  ],
+  "Metal062C": [
+   0.5625,
+   0.5262,
+   0.4759
+  ]
+ },
+ "source": "ambientCG.com, CC0 1.0"
+}

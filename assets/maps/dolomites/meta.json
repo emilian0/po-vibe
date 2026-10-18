@@ -1,0 +1,203 @@
+{
+ "origin_epsg25832": [
+  714700.0,
+  5158400.0
+ ],
+ "y0": 2000.0,
+ "size": 2048,
+ "levels": {
+  "near": {
+   "res": 2.0,
+   "extent": 4096.0,
+   "offset": 1000.0,
+   "scale": 0.032,
+   "min": 1610.5707126193577,
+   "max": 2996.6831665039062
+  },
+  "mid": {
+   "res": 8.0,
+   "extent": 16384.0,
+   "offset": 0.0,
+   "scale": 0.06,
+   "min": 1274.644287109375,
+   "max": 3172.756591796875
+  },
+  "far": {
+   "res": 32.0,
+   "extent": 65536.0,
+   "offset": 0.0,
+   "scale": 0.06,
+   "min": 267.6828918457031,
+   "max": 3306.936767578125
+  }
+ },
+ "attribution": [
+  "Terrain: Autonome Provinz Bozen - S\u00fcdtirol / Provincia autonoma di Bolzano - Alto Adige, DTM 2.5 m and 0.5 m (CC0 1.0)",
+  "Distant terrain: Copernicus DEM GLO-30, \u00a9 DLR e.V. 2010-2014 and \u00a9 Airbus Defence and Space GmbH 2014-2018, provided under COPERNICUS by the European Union and ESA",
+  "Road: \u00a9 OpenStreetMap contributors (ODbL)"
+ ],
+ "landmarks": {
+  "pass": [
+   591.5,
+   121.4,
+   571.1
+  ],
+  "chapel_san_mauriz": [
+   351.2,
+   125.3,
+   529.0
+  ],
+  "peaks": {
+   "Gran Cir - Gro\u00dfe Cirspitze - Grande Cir": [
+    388.6,
+    589.0,
+    1531.7
+   ],
+   "Murfreitspitze": [
+    432.2,
+    629.9,
+    -574.7
+   ],
+   "Sass dai Ciamorces": [
+    717.8,
+    984.9,
+    -1471.1
+   ],
+   "Piz Rotic": [
+    299.1,
+    964.1,
+    -1670.0
+   ],
+   "Pitla Cir - Kleine Cirspitze - Cir V": [
+    -95.7,
+    514.7,
+    1315.5
+   ],
+   "Piz Beguz": [
+    63.6,
+    969.7,
+    -1902.0
+   ],
+   "Sas da Lech": [
+    1276.4,
+    931.9,
+    -1148.4
+   ],
+   "Ciampanil de Cuecenes": [
+    -604.8,
+    370.9,
+    1303.6
+   ],
+   "Piz Culac": [
+    -1479.2,
+    86.2,
+    -575.7
+   ],
+   "Grant Ciampanil de Murfreit": [
+    -411.8,
+    714.9,
+    -1242.8
+   ],
+   "Pitl Ciampanil de Murfreit": [
+    -264.8,
+    711.7,
+    -1270.6
+   ],
+   "Bustac": [
+    -500.2,
+    252.5,
+    460.7
+   ],
+   "Sas dla Luesa": [
+    990.4,
+    617.5,
+    -200.1
+   ],
+   "Sas dal Fuech": [
+    -1490.6,
+    8.8,
+    1571.6
+   ],
+   "II Piza Cuecena": [
+    -824.3,
+    294.8,
+    1333.5
+   ],
+   "Punta Clark": [
+    520.6,
+    504.7,
+    1542.7
+   ],
+   "III Piza Cuecena": [
+    -694.5,
+    358.9,
+    1304.3
+   ],
+   "I Piza Cuecena": [
+    -919.4,
+    239.0,
+    1309.2
+   ],
+   "Torre Campidel": [
+    1303.5,
+    550.7,
+    -212.7
+   ],
+   "Col du Frea": [
+    838.1,
+    235.5,
+    136.7
+   ],
+   "Torrione Vitty": [
+    720.9,
+    630.2,
+    -716.0
+   ],
+   "Torre dell'Independenza": [
+    352.9,
+    660.2,
+    -886.9
+   ],
+   "Torrione Holzer": [
+    623.0,
+    621.7,
+    -716.9
+   ],
+   "Pitl Sass dla Luesa": [
+    890.8,
+    604.4,
+    -259.0
+   ],
+   "Sass val Culea": [
+    817.0,
+    640.0,
+    -762.3
+   ],
+   "Masores de Murfreid": [
+    8.8,
+    645.3,
+    -1178.8
+   ],
+   "Jimmy Turm": [
+    609.3,
+    371.7,
+    1501.2
+   ],
+   "Geltrude Turm": [
+    1192.4,
+    422.6,
+    1682.3
+   ],
+   "Torre Orientale delle Meisules dala Biesces": [
+    -459.6,
+    329.3,
+    -967.2
+   ],
+   "Torre Occidentale delle Meisules dala Biesces": [
+    -637.4,
+    253.6,
+    -996.4
+   ]
+  }
+ }
+}

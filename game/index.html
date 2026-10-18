@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Po valley drive</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="c" tabindex="0" aria-label="A drivable red Alfa Romeo 33 on a country circuit in the Po valley, crossing the river twice."></canvas>
+<div class="hud" aria-hidden="true">
+  <div class="chip"><b id="spd">0</b><span>km/h</span></div>
+  <div class="chip"><b id="lap">0:00.0</b><span>lap</span></div>
+  <div class="chip"><b id="best">–</b><span>best</span></div>
+</div>
+<div class="tools">
+  <select id="carSel" aria-label="Choose a car"></select>
+  <button id="hornBtn" type="button">Horn</button>
+  <button id="camBtn" type="button">Camera</button>
+  <button id="timeBtn" type="button" aria-pressed="false">Golden hour</button>
+  <button id="soundBtn" type="button" aria-pressed="true">Sound</button>
+  <button id="lightBtn" type="button" aria-pressed="false">Lights</button>
+  <button id="resetBtn" type="button">Reset car</button>
+  <button id="perfBtn" type="button" aria-pressed="false">Perf</button>
+</div>
+<div class="help" id="help"><span>Double-click the car or press <kbd>Enter</kbd> to get in or out. <kbd>W A S D</kbd> or arrows to drive, drag to look around, <kbd>Space</kbd> handbrake, <kbd>C</kbd> camera, <kbd>L</kbd> lights, <kbd>H</kbd> horn, <kbd>T</kbd> golden hour, <kbd>R</kbd> reset</span><button id="helpClose" type="button" aria-label="Hide keyboard help">Hide</button></div>
+<div class="mode" id="modeChip" aria-hidden="true">Loading…</div>
+<div id="joy" class="joy" aria-hidden="true"><div id="knob" class="knob"></div></div>
+<div class="hint hint-l" aria-hidden="true">Left thumb: look around</div>
+<div class="hint hint-r" aria-hidden="true">Right thumb: steer, gas, brake</div>
+<div class="status" id="status">Building the countryside…</div>
+<div class="sr" aria-live="polite" id="announce"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/cannon@0.6.2/build/cannon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs@9.29.0/babylon.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs-loaders@9.29.0/babylonjs.loaders.min.js"></script>
+<script src="src/main.js?v=20261011"></script>
+</body>
+</html>

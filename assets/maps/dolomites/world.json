@@ -1,0 +1,320 @@
+{
+ "version": "corridor-01",
+ "y0": 2000.0,
+ "size": 2048,
+ "scale": 0.8333333333333334,
+ "compress": 1.2,
+ "levels": [
+  {
+   "name": "near",
+   "center": [
+    0.0,
+    0.0
+   ],
+   "res": 2.0,
+   "extent": 4096.0,
+   "offset": -1500.0,
+   "scale": 0.05,
+   "min": -347.98170664250927,
+   "max": 830.1788330078125,
+   "detail": true
+  },
+  {
+   "name": "vg",
+   "center": [
+    -1931.15,
+    -403.11
+   ],
+   "res": 2.0,
+   "extent": 4096.0,
+   "offset": -1500.0,
+   "scale": 0.05,
+   "min": -388.40149265547234,
+   "max": 811.6497802734375,
+   "detail": true
+  },
+  {
+   "name": "bz",
+   "center": [
+    -3313.73,
+    -789.15
+   ],
+   "res": 4.0,
+   "extent": 8192.0,
+   "offset": -1500.0,
+   "scale": 0.05,
+   "min": -404.6817410786946,
+   "max": 875.13671875,
+   "detail": true
+  },
+  {
+   "name": "ga",
+   "center": [
+    -4586.7,
+    -1255.36
+   ],
+   "res": 4.0,
+   "extent": 8192.0,
+   "offset": -1500.0,
+   "scale": 0.05,
+   "min": -404.6817410786946,
+   "max": 1085.4209391276042,
+   "detail": true
+  },
+  {
+   "name": "mid",
+   "center": [
+    -2241.74,
+    -719.48
+   ],
+   "res": 16.0,
+   "extent": 32768.0,
+   "offset": -4000.0,
+   "scale": 0.12,
+   "min": -1205.1766345952008,
+   "max": 1567.1537962640896,
+   "detail": true
+  },
+  {
+   "name": "far",
+   "center": [
+    -2241.74,
+    -719.48
+   ],
+   "res": 64.0,
+   "extent": 131072.0,
+   "offset": -4000.0,
+   "scale": 0.12,
+   "min": -1667.8522221247356,
+   "max": 2913.548583984375
+  }
+ ],
+ "patches": {
+  "dolomites": {
+   "shift": [
+    -714700.0,
+    -5158400.0
+   ],
+   "y_offset": 0.0
+  },
+  "bolzano": {
+   "shift": [
+    -681763.49,
+    -5150150.37
+   ],
+   "y_offset": 1323.24
+  },
+  "garda": {
+   "shift": [
+    -649337.76,
+    -5084198.31
+   ],
+   "y_offset": 1539.38
+  }
+ },
+ "water": {
+  "garda": {
+   "y": -329.68,
+   "mask": "lake_mask.png",
+   "center": [
+    -2241.744133736117,
+    -719.4836022251251
+   ],
+   "res": 16.0
+  }
+ },
+ "landmarks": {
+  "pass": [
+   492.9,
+   101.2,
+   475.9
+  ],
+  "chapel_san_mauriz": [
+   292.7,
+   104.4,
+   440.8
+  ],
+  "peaks": {
+   "Gran Cir - Gro\u00dfe Cirspitze - Grande Cir": [
+    323.8,
+    490.8,
+    1276.4
+   ],
+   "Murfreitspitze": [
+    360.2,
+    524.9,
+    -478.9
+   ],
+   "Sass dai Ciamorces": [
+    598.2,
+    820.8,
+    -1225.9
+   ],
+   "Piz Rotic": [
+    249.3,
+    803.4,
+    -1391.7
+   ],
+   "Pitla Cir - Kleine Cirspitze - Cir V": [
+    -79.8,
+    428.9,
+    1096.2
+   ],
+   "Piz Beguz": [
+    53.0,
+    808.1,
+    -1585.0
+   ],
+   "Sas da Lech": [
+    1063.7,
+    776.6,
+    -957.0
+   ],
+   "Ciampanil de Cuecenes": [
+    -504.0,
+    309.1,
+    1086.3
+   ],
+   "Piz Culac": [
+    -1232.7,
+    71.8,
+    -479.8
+   ],
+   "Grant Ciampanil de Murfreit": [
+    -343.2,
+    595.8,
+    -1035.7
+   ],
+   "Pitl Ciampanil de Murfreit": [
+    -220.7,
+    593.1,
+    -1058.8
+   ],
+   "Bustac": [
+    -416.8,
+    210.4,
+    383.9
+   ],
+   "Sas dla Luesa": [
+    825.3,
+    514.6,
+    -166.8
+   ],
+   "Sas dal Fuech": [
+    -1242.2,
+    7.3,
+    1309.7
+   ],
+   "II Piza Cuecena": [
+    -686.9,
+    245.7,
+    1111.2
+   ],
+   "Punta Clark": [
+    433.8,
+    420.6,
+    1285.6
+   ],
+   "III Piza Cuecena": [
+    -578.8,
+    299.1,
+    1086.9
+   ],
+   "I Piza Cuecena": [
+    -766.2,
+    199.2,
+    1091.0
+   ],
+   "Torre Campidel": [
+    1086.2,
+    458.9,
+    -177.2
+   ],
+   "Col du Frea": [
+    698.4,
+    196.2,
+    113.9
+   ],
+   "Torrione Vitty": [
+    600.8,
+    525.2,
+    -596.7
+   ],
+   "Torre dell'Independenza": [
+    294.1,
+    550.2,
+    -739.1
+   ],
+   "Torrione Holzer": [
+    519.2,
+    518.1,
+    -597.4
+   ],
+   "Pitl Sass dla Luesa": [
+    742.3,
+    503.7,
+    -215.8
+   ],
+   "Sass val Culea": [
+    680.8,
+    533.3,
+    -635.2
+   ],
+   "Masores de Murfreid": [
+    7.3,
+    537.8,
+    -982.3
+   ],
+   "Jimmy Turm": [
+    507.8,
+    309.8,
+    1251.0
+   ],
+   "Geltrude Turm": [
+    993.7,
+    352.2,
+    1401.9
+   ],
+   "Torre Orientale delle Meisules dala Biesces": [
+    -383.0,
+    274.4,
+    -806.0
+   ],
+   "Torre Occidentale delle Meisules dala Biesces": [
+    -531.2,
+    211.3,
+    -830.3
+   ]
+  },
+  "sassolungo_meadow": [
+   -1810.2,
+   -800.7
+  ],
+  "castel_firmiano": [
+   -4015.9,
+   -147.0
+  ],
+  "nago_reveal": [
+   -2162.2,
+   -1565.1
+  ],
+  "torbole": [
+   -3276.9,
+   -2314.0
+  ],
+  "monte_brione": [
+   -3818.1,
+   -1307.7
+  ],
+  "riva": [
+   -5346.3,
+   -972.6
+  ]
+ },
+ "attribution": [
+  "Terrain: Autonome Provinz Bozen - S\u00fcdtirol / Provincia autonoma di Bolzano - Alto Adige, DTM 2.5 m and 0.5 m (CC0 1.0)",
+  "Distant terrain: Copernicus DEM GLO-30, \u00a9 DLR e.V. 2010-2014 and \u00a9 Airbus Defence and Space GmbH 2014-2018, provided under COPERNICUS by the European Union and ESA",
+  "Road: \u00a9 OpenStreetMap contributors (ODbL)",
+  "Bolzano patch: South Tyrol DTM 2.5 m (CC0); Garda patch: Copernicus DEM GLO-30; roads, landuse and buildings: OpenStreetMap contributors (ODbL)"
+ ]
+}
