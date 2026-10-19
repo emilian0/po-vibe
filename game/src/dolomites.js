@@ -15,6 +15,11 @@
         live.push({ r: new WeakRef(this.buffer), where: st.replace(/^\s*at\s*/, '').replace(/https?:\/\/[^/]+\//, '').replace(/\?v=\d+/, '').slice(0, 90) }); } } };
       Object.defineProperty(Traced, 'name', { value: name }); window[name] = Traced;
     }
+    window.__memPeak = { mb: 0, at: '' }; const st0 = document.getElementById('status');
+    const bySite = () => { const seen = new Set(), by = {}; for (const e of live) { const b = e.r.deref(); if (!b || seen.has(b)) continue; seen.add(b); by[e.where] = (by[e.where] || 0) + b.byteLength; }
+      return Object.entries(by).sort((x, y) => y[1] - x[1]).slice(0, 12).map(([w, v]) => Math.round(v / 1e6) + ' MB  ' + w); };
+    const GCS = new URLSearchParams(location.search).get('memtrace') === 'gc' && window.gc;      // &memtrace=gc: live data only (slow)
+    setInterval(() => { if (GCS) window.gc(); const m = performance.memory ? performance.memory.usedJSHeapSize / 1e6 : 0; if (m > window.__memPeak.mb + 20) window.__memPeak = { mb: Math.round(m), at: st0 ? st0.textContent.slice(0, 60) : '', t: Math.round(performance.now()), live: bySite() }; }, GCS ? 250 : 50);
     window.__memTrace = () => { const seen = new Set(), by = {};
       for (const e of live) { const b = e.r.deref(); if (!b || seen.has(b)) continue; seen.add(b); by[e.where] = (by[e.where] || 0) + b.byteLength; }
       return Object.entries(by).sort((x, y) => y[1] - x[1]).slice(0, 25).map(([w, v]) => Math.round(v / 1e6) + ' MB  ' + w); };
@@ -493,10 +498,13 @@ float carAO(vec3 p) {
   const bindCar = (m) => { m.setTexture('carMask', carMaskRT); m.setMatrix('carShadowM', carState.M); m.setVector4('carP', new BABYLON.Vector4(carState.pos.x, carState.pos.y, carState.pos.z, carState.on)); m.setVector4('carF', new BABYLON.Vector4(carState.fwd.x, carState.fwd.z, carState.halfW, carState.halfL)); };
 
   // ---------- terrain textures: every level packed into texture arrays ----------
+  // one image at a time, and the bitmap and canvas freed at once: decoding all ~26 maps in parallel (bitmap + 2048² canvas +
+  // pixel copy each) made a ~1.9 GB peak while loading, enough to crash phone tabs (2026-10-19)
   const imgBytes = async (p) => {
     const bmp = await createImageBitmap(await (await fetch(assetUrl(p))).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
     const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
-    const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0); return cx.getImageData(0, 0, bmp.width, bmp.height).data;
+    const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0); const d = cx.getImageData(0, 0, bmp.width, bmp.height).data;
+    bmp.close(); cv.width = cv.height = 0; return d;
   };
   // GPU arrays are built in a block so the staging copies (300+ MB) are freed after upload (the engine keeps no copies either)
   let hArr, nArr, aArr, bArr;
@@ -504,14 +512,20 @@ float carAO(vec3 p) {
   // vines or orchards), bit 1 vineyard, bit 2 orchard/olive. 4 MB per detail level instead of two 16 MB copies.
   const DETAIL_F = {};
   {
-    const hData = new Uint16Array(N * N * NL); LV.forEach((k, i) => hData.set(HT[k], i * N * N));
+    // no mipmaps: Babylon does not build them for raw 2D arrays, and sampling missing levels returned garbage at distance
+    const mkArr = (d) => { const t = new BABYLON.RawTexture2DArray(d, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, false, false, BABYLON.Texture.BILINEAR_SAMPLINGMODE); t.wrapU = t.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE; return t; };
+    // one staging array at a time (each ~100 MB), dropped right after its upload
+    let hData = new Uint16Array(N * N * NL); LV.forEach((k, i) => hData.set(HT[k], i * N * N));
     hArr = new BABYLON.RawTexture2DArray(hData, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RED_INTEGER, scene, false, false, BABYLON.Texture.NEAREST_SAMPLINGMODE, BABYLON.Engine.TEXTURETYPE_UNSIGNED_SHORT);
-    const nData = new Uint8Array(N * N * 4 * NL), aData = new Uint8Array(N * N * 4 * NL), bData = new Uint8Array(N * N * 4 * NL);
-    await Promise.all(LVL.map(async (L) => {
+    hData = null;
+    let nData = new Uint8Array(N * N * 4 * NL);
+    for (const L of LVL) nData.set(await imgBytes(MAP + L.name + '_n.png'), L.i * N * N * 4);
+    nArr = mkArr(nData); nData = null;
+    let aData = new Uint8Array(N * N * 4 * NL), bData = new Uint8Array(N * N * 4 * NL);
+    for (const L of LVL) {
       const o = L.i * N * N * 4;
-      nData.set(await imgBytes(MAP + L.name + '_n.png'), o);
       if (L.detail) {
-        const [m, c, r, lu] = await Promise.all(['_m.png', '_c.png', '_r.png', '_l.png'].map((x) => imgBytes(MAP + L.name + x)));
+        const m = await imgBytes(MAP + L.name + '_m.png'), c = await imgBytes(MAP + L.name + '_c.png'), r = await imgBytes(MAP + L.name + '_r.png'), lu = await imgBytes(MAP + L.name + '_l.png');
         const F = new Uint8Array(N * N);
         for (let p = 0; p < N * N; p++) { const q = p * 4;
           aData[o + q] = m[q]; aData[o + q + 1] = m[q + 1]; aData[o + q + 2] = m[q + 2]; aData[o + q + 3] = c[q];
@@ -520,10 +534,8 @@ float carAO(vec3 p) {
           F[p] = (canopy < 8 && scree < 90 && outcrop < 170 && urban < 60 && vine < 60 && orchard < 60 ? 1 : 0) | (vine >= 140 ? 2 : 0) | (orchard >= 140 ? 4 : 0); }
         DETAIL_F[L.name] = F;
       }
-    }));
-    // no mipmaps: Babylon does not build them for raw 2D arrays, and sampling missing levels returned garbage at distance
-    const mkArr = (d) => { const t = new BABYLON.RawTexture2DArray(d, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, false, false, BABYLON.Texture.BILINEAR_SAMPLINGMODE); t.wrapU = t.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE; return t; };
-    nArr = mkArr(nData); aArr = mkArr(aData); bArr = mkArr(bData);
+    }
+    aArr = mkArr(aData); aData = null; bArr = mkArr(bData); bData = null;
   }
   const lvHArr = LVL.flatMap((L) => [L.offset, L.scale]);
   const lvDArr = LVL.flatMap((L) => [L.cx, L.cz, L.half, L.res]), patchCArr = PATCH_C.flat();
@@ -541,14 +553,13 @@ float carAO(vec3 p) {
     const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
     const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
     const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0);
-    return new Uint8Array(cx.getImageData(0, 0, bmp.width, bmp.height).data.buffer);
+    const d = new Uint8Array(cx.getImageData(0, 0, bmp.width, bmp.height).data.buffer); bmp.close(); cv.width = cv.height = 0; return d;
   };
   const texArr = {};
   {
     const S = TEX_INFO.size, NL = TEX_INFO.layers.length;
-    const [a, b] = await Promise.all([loadStrip('textures/terrain/albedo.jpg'), loadStrip('textures/terrain/nh.jpg')]);
-    for (const [k, d] of [['alb', a], ['nh', b]]) {
-      const t = new BABYLON.RawTexture2DArray(d, S, S, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE);
+    for (const [k, src] of [['alb', 'textures/terrain/albedo.jpg'], ['nh', 'textures/terrain/nh.jpg']]) {      // one after the other (100 MB each)
+      const t = new BABYLON.RawTexture2DArray(await loadStrip(src), S, S, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE);
       t.wrapU = t.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE; t.anisotropicFilteringLevel = Q.photoAniso; texArr[k] = t;      // 8x cost 10-15 % of the GPU frame for no visible difference over 4x (tools/gpu_profile.js, 2026-10-16)
     }
   }
@@ -1918,6 +1929,7 @@ void main() {
     const sm = c.simple.vds().map((v, i) => lifeMesh(v, 'bS' + k + '_' + i)), fm = c.hasFull ? c.full.vds().map((v, i) => lifeMesh(v, 'bF' + k + '_' + i)) : [];
     lifeCount += c.simple.count(); if (fm.length) bLod.push({ cx: c.cx, cz: c.cz, sm, fm, near: null });
   }
+  releaseGeometry();      // the buildings' arrays (~230 MB) go before the scatter is built: keeps the loading peak down
   let bT = 0;
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now(); if (now - bT < 250) return; bT = now;
@@ -2287,6 +2299,7 @@ void main() {
       m.thinInstanceRefreshBoundingInfo = () => {}; }
     rockCells.push({ lods, cut: SHRUB_LOD, cx: cx + SHRUBS.cell / 2, cz: cz + SHRUBS.cell / 2, far: true });
   }
+  releaseGeometry();      // trees, rocks and shrubs
   let treeT = 0;
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now(); if (now - treeT < 300) return; treeT = now;
@@ -3936,6 +3949,27 @@ void main() {
   // per material on the 5500M). A first frame that pays all of them at once ran ~15 s, past Chrome's GPU watchdog, which
   // kills the GPU process (screen glitch; after a few, WebGL is disabled). So the pipelines are built here, one small piece
   // per step, each waited on with a fence: every material once into a tiny target, then the complete frame on a tiny canvas.
+  // release CPU copies of static geometry (task A, 2026-10-19): Babylon keeps every vertex, index and thin-instance array after
+  // upload (~400 MB here). Nothing reads them back except picking (pickable meshes keep theirs), updatable buffers and the
+  // per-mesh GPU diagnostic (done by now). Meshes built later (grass tiles, spray) are untouched. &keepgeo: keep everything. It runs before the shader warm-up
+  // (which only draws): kept until after it, these copies made the loading peak (1.27 GB) that crashed phone tabs.
+  function releaseGeometry() {      // a hoisted declaration: also called while the scene is built (after buildings, after scatter)
+    if (QS.has('keepgeo')) return;
+    let freed = window.__geoFreedMB ? window.__geoFreedMB * 1e6 : 0;
+    for (const g of scene.geometries) {
+      if (!g.meshes.length || g.meshes.some((m) => m.isPickable)) continue;
+      // sub-mesh bounding boxes are filled only by refreshBoundingInfo (the transparent sort reads them): fill them while the
+      // positions still exist. Indices are kept (47 MB): with them gone Babylon rebuilds sub-meshes and loses their boxes
+      for (const m of g.meshes) { m.getBoundingInfo(); if (m.subMeshes) for (const sm of m.subMeshes) sm.refreshBoundingInfo(); }
+      for (const k in g._vertexBuffers) { const b = g._vertexBuffers[k]._buffer; if (b && !b.isUpdatable() && b._data) { freed += b._data.byteLength || b._data.length * 4; b._data = null; } }
+    }
+    for (const m of scene.meshes) {
+      const s = m._thinInstanceDataStorage;
+      if (s && s.matrixData && !m.isPickable && s.matrixBuffer && !s.matrixBuffer.isUpdatable()) { freed += s.matrixData.byteLength; s.matrixData = null; s.matrixBuffer._data = null; }
+    }
+    window.__geoFreedMB = Math.round(freed / 1e6);
+  }
+  releaseGeometry();
   if (!QS.has('nowarmup')) {
     const gl = engine._gl, t0w = performance.now();
     const fenceWait = async () => { const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
@@ -4144,24 +4178,7 @@ void main() {
     show(`DIAG COMPLETE. Worst normal frame ${worst.toFixed(0)} ms. Send me the log file.`); window.__diagDone = true; window.__watchdog = 'stopped';
   }
   statusEl.hidden = true;
-  // release CPU copies of static geometry (task A, 2026-10-19): Babylon keeps every vertex, index and thin-instance array after
-  // upload (~400 MB here). Nothing reads them back except picking (pickable meshes keep theirs), updatable buffers and the
-  // per-mesh GPU diagnostic (done by now). Meshes built later (grass tiles, spray) are untouched. &keepgeo: keep everything.
-  if (!QS.has('keepgeo')) {
-    let freed = 0;
-    for (const g of scene.geometries) {
-      if (!g.meshes.length || g.meshes.some((m) => m.isPickable)) continue;
-      // sub-mesh bounding boxes are filled only by refreshBoundingInfo (the transparent sort reads them): fill them while the
-      // positions still exist. Indices are kept (47 MB): with them gone Babylon rebuilds sub-meshes and loses their boxes
-      for (const m of g.meshes) { m.getBoundingInfo(); if (m.subMeshes) for (const sm of m.subMeshes) sm.refreshBoundingInfo(); }
-      for (const k in g._vertexBuffers) { const b = g._vertexBuffers[k]._buffer; if (b && !b.isUpdatable() && b._data) { freed += b._data.byteLength || b._data.length * 4; b._data = null; } }
-    }
-    for (const m of scene.meshes) {
-      const s = m._thinInstanceDataStorage;
-      if (s && s.matrixData && !m.isPickable && s.matrixBuffer && !s.matrixBuffer.isUpdatable()) { freed += s.matrixData.byteLength; s.matrixData = null; s.matrixBuffer._data = null; }
-    }
-    window.__geoFreedMB = Math.round(freed / 1e6);
-  }
+  releaseGeometry();      // again, for anything built during the warm-up (cheap: released buffers are skipped)
   if (modeChip && !DRIVE) modeChip.textContent = 'Dolomites look-dev · G: look panel · WASD + mouse: fly';
   // frame watchdog: a frame over 250 ms (twice) drops the expensive passes; over 2 s the loop stops rather than keep a hung GPU busy
   let wdLast = performance.now(), wdSlow = 0, wdFrames = 0, wdHung = 0;
