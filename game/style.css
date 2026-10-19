@@ -46,21 +46,27 @@
   cursor: pointer; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
 .tools select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
-/* Corridor driving: separate steering and pedals, usable with simultaneous touches. */
+/* Corridor driving: two floating sticks (left steers, right is gas / brake), usable with simultaneous touches. */
 #driveTouch { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
 #driveTouch button { pointer-events: auto; touch-action: none; -webkit-touch-callout: none;
   color: #fff; background: rgba(18, 26, 29, .68); border: 2px solid rgba(255,255,255,.55);
   border-radius: 18px; font-size: 15px; font-weight: 700; line-height: 1.2; font-family: inherit; min-height: 48px; }
 #driveTouch button.pressed { background: #e8bb52; color: #192127; border-color: #ffe4a1; }
-.touch-steer, .touch-pedals { position: absolute; bottom: max(18px, env(safe-area-inset-bottom)); display: flex; gap: 12px; align-items: end; }
-.touch-steer { left: max(18px, env(safe-area-inset-left)); }
-.touch-steer button { width: clamp(64px, 10vw, 88px); height: 76px; font-size: 28px !important; }
-.touch-pedals { right: max(18px, env(safe-area-inset-right)); }
-#driveTouch .touch-gas { width: 76px; height: 112px; background: rgba(50,90,70,.8); }
-#driveTouch .touch-brake { width: 76px; height: 84px; }
-.touch-brake span { display: block; font-size: 10px; }
-#driveTouch .touch-hand { position: absolute; right: 0; bottom: 124px; width: 164px; height: 48px; font-size: 12px; }
-#driveTouch .pressed.touch-gas { background: #e8bb52; }
+.stick-zone { position: absolute; top: 22%; bottom: 0; width: 50%; pointer-events: auto; touch-action: none;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.stick-zone[data-stick="steer"] { left: 0; }
+.stick-zone[data-stick="pedal"] { right: 0; }
+.stick { position: absolute; width: 132px; height: 132px; margin: -66px 0 0 -66px; border-radius: 50%;
+  background: rgba(18, 26, 29, .28); border: 2px solid rgba(255,255,255,.35); opacity: .55; transition: opacity .15s; }
+.stick-zone[data-stick="steer"] .stick { border-radius: 66px / 40px; height: 80px; margin-top: -40px; }
+.stick-zone[data-stick="pedal"] .stick { border-radius: 40px / 66px; width: 80px; margin-left: -40px; }
+.stick-zone.active .stick { opacity: 1; transition: none; }
+.knob { position: absolute; left: 50%; top: 50%; width: 60px; height: 60px; border-radius: 50%; transform: translate(-50%, -50%);
+  background: rgba(255,255,255,.82); box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+.stick-zone.active .knob { background: #e8bb52; }
+.stick-label { position: absolute; bottom: max(10px, env(safe-area-inset-bottom)); left: 0; right: 0; text-align: center;
+  font-size: 11px; font-weight: 700; letter-spacing: .08em; color: rgba(255,255,255,.7); text-shadow: 0 1px 3px rgba(0,0,0,.6); pointer-events: none; }
+#driveTouch .touch-hand { position: absolute; z-index: 1; top: calc(22% + 8px); right: max(18px, env(safe-area-inset-right)); width: 150px; height: 48px; font-size: 12px; }
 .touch-actions { position: absolute; left: max(12px, env(safe-area-inset-left)); top: max(10px, env(safe-area-inset-top)); display: flex; gap: 8px; }
 .touch-actions button { padding: 10px 12px; }
 .corridor-touch .mode { top: max(12px, env(safe-area-inset-top)); padding: 12px; font-size: 18px; }
@@ -68,11 +74,7 @@
 .corridor-touch .tools button { min-height: 48px; padding: 8px 10px; }
 .corridor-touch .hint, .corridor-touch .help, .corridor-touch .joy { display: none !important; }
 @media (max-width: 500px) {
-  .touch-steer, .touch-pedals { gap: 8px; bottom: max(16px, env(safe-area-inset-bottom)); }
-  .touch-steer { left: max(10px, env(safe-area-inset-left)); }
-  .touch-pedals { right: max(10px, env(safe-area-inset-right)); }
-  .touch-steer button { width: 60px; height: 72px; }
-  #driveTouch .touch-gas, #driveTouch .touch-brake { width: 64px; }
-  #driveTouch .touch-hand { width: 136px; }
+  #driveTouch .touch-hand { width: 120px; }
+  .stick-zone { top: 30%; } #driveTouch .touch-hand { top: calc(30% + 8px); }      /* portrait: below the taller top bar */
   .corridor-touch .mode { top: calc(70px + env(safe-area-inset-top)); }
 }

@@ -3554,7 +3554,7 @@ void main() {
 
   // ---------- driving: cannon RaycastVehicle (same tuning as the Po map) on a heightfield window that follows the car ----------
   const DRIVE = !QS.has('shot') && car && typeof CANNON !== 'undefined';
-  const keys = {}, touchKeys = {};
+  const keys = {}, touchKeys = {}, touchAxis = { steer: 0, pedal: 0 };      // touch sticks: steer -1..1 (right +), pedal -1..1 (gas +)
   const touchDriving = isTouch || navigator.maxTouchPoints > 0 || QS.has('touch');
   let driving = false, chassis = null, vehicle = null, steer = 0, camMode = 0, physWorld = null;
   const wheels = []; let C0Y = 0.6;
@@ -3620,10 +3620,41 @@ void main() {
     if (touchDriving) {
       document.body.classList.add('corridor-touch');
       const pad = document.createElement('div'); pad.id = 'driveTouch';
+      // two floating sticks (2026-10-19, the user's choice): the left half steers (sideways), the right half is gas (up) and
+      // brake / reverse (down). Each stick appears under the thumb; values are analog. Handbrake, camera and reset stay buttons.
       pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button></div>' +
-        '<div class="touch-steer"><button type="button" data-key="KeyA" aria-label="Steer left">◀</button><button type="button" data-key="KeyD" aria-label="Steer right">▶</button></div>' +
-        '<div class="touch-pedals"><button type="button" class="touch-hand" data-key="Space" aria-label="Handbrake">HANDBRAKE</button><button type="button" class="touch-brake" data-key="KeyS" aria-label="Brake; hold at standstill to reverse">BRAKE<span> / REVERSE</span></button><button type="button" class="touch-gas" data-key="KeyW" aria-label="Accelerate">GAS</button></div>';
+        '<div class="stick-zone" data-stick="steer" aria-label="Steering stick: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
+        '<div class="stick-zone" data-stick="pedal" aria-label="Pedal stick: drag up for gas, down to brake and reverse"><div class="stick"><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>' +
+        '<button type="button" class="touch-hand" data-key="Space" aria-label="Handbrake">HANDBRAKE</button>';
       document.body.appendChild(pad);
+      const R = 58, DEAD = 0.08;
+      const sticks = {};
+      for (const zone of pad.querySelectorAll('.stick-zone')) {
+        const kind = zone.dataset.stick, base = zone.querySelector('.stick'), knob = zone.querySelector('.knob');
+        const S = sticks[kind] = { id: null, x0: 0, y0: 0, zone, base, knob };
+        const rest = () => { const r = zone.getBoundingClientRect(); base.style.left = (kind === 'steer' ? r.width * 0.42 : r.width * 0.58) + 'px'; base.style.top = r.height * 0.62 + 'px'; };
+        S.reset = () => { S.id = null; touchAxis[kind] = 0; knob.style.transform = 'translate(-50%, -50%)'; zone.classList.remove('active'); rest(); };
+        const move = (e) => {
+          let dx = (e.clientX - S.x0) / R, dy = (S.y0 - e.clientY) / R;
+          if (kind === 'steer') dy = 0; else dx = 0;
+          const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
+          knob.style.transform = `translate(calc(-50% + ${dx * R}px), calc(-50% + ${-dy * R}px))`;
+          const v = kind === 'steer' ? dx : dy, a = Math.max(0, (Math.abs(v) - DEAD) / (1 - DEAD));
+          touchAxis[kind] = Math.sign(v) * (kind === 'steer' ? Math.pow(a, 1.6) : a);      // finer steering near the centre
+        };
+        zone.addEventListener('pointerdown', (e) => {
+          if (S.id !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
+          e.preventDefault(); S.id = e.pointerId; const r = zone.getBoundingClientRect();
+          S.x0 = e.clientX; S.y0 = e.clientY; base.style.left = (e.clientX - r.left) + 'px'; base.style.top = (e.clientY - r.top) + 'px';
+          zone.classList.add('active'); move(e);
+          try { zone.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
+        });
+        zone.addEventListener('pointermove', (e) => { if (e.pointerId === S.id) move(e); });
+        const end = (e) => { if (e.pointerId === S.id) S.reset(); };
+        zone.addEventListener('pointerup', end); zone.addEventListener('pointercancel', end); zone.addEventListener('lostpointercapture', end);
+        zone.addEventListener('contextmenu', (e) => e.preventDefault());
+        S.reset();
+      }
       const held = new Map();
       const sync = () => {
         for (const button of pad.querySelectorAll('[data-key]')) {
@@ -3636,7 +3667,7 @@ void main() {
       for (const button of pad.querySelectorAll('[data-key]')) {
         button.addEventListener('pointerdown', e => {
           if (e.pointerType === 'mouse' && e.button !== 0) return;
-          e.preventDefault(); held.set(e.pointerId, button); sync();
+          e.preventDefault(); e.stopPropagation(); held.set(e.pointerId, button); sync();
           try { button.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
         });
         button.addEventListener('lostpointercapture', release);
@@ -3644,7 +3675,7 @@ void main() {
       }
       window.addEventListener('pointerup', release);
       window.addEventListener('pointercancel', release);
-      const clear = () => { held.clear(); sync(); };
+      const clear = () => { held.clear(); sync(); for (const S of Object.values(sticks)) S.reset(); };
       window.addEventListener('blur', clear);
       window.addEventListener('pagehide', clear);
       window.addEventListener('resize', clear);
@@ -3708,10 +3739,12 @@ void main() {
     const vF = chassis.velocity.dot(fwdV), kmh = Math.abs(vF) * 3.6, on = driving;
     const kUp = on && (keys.ArrowUp || keys.KeyW || touchKeys.KeyW), kDown = on && (keys.ArrowDown || keys.KeyS || touchKeys.KeyS), kL = on && (keys.ArrowLeft || keys.KeyA || touchKeys.KeyA), kR = on && (keys.ArrowRight || keys.KeyD || touchKeys.KeyD), hand = !on || keys.Space || touchKeys.Space;
     const AP = autopilot && autopilot.on ? autopilot.step(chassis, fwdV, kmh) : null;     // test hook: follows the route, ?autodrive
-    const maxSteer = 0.42 + (0.09 - 0.42) * Math.min(1, kmh / 130), target = AP ? Math.max(-1, Math.min(1, AP.steer)) * maxSteer : ((kR ? 1 : 0) - (kL ? 1 : 0)) * maxSteer;
+    const keySteer = (kR ? 1 : 0) - (kL ? 1 : 0), stickSteer = on ? touchAxis.steer : 0;
+    const maxSteer = 0.42 + (0.09 - 0.42) * Math.min(1, kmh / 130), target = AP ? Math.max(-1, Math.min(1, AP.steer)) * maxSteer : (keySteer || stickSteer) * maxSteer;
     steer += (target - steer) * Math.min(1, dt * (target === 0 ? 4.0 : 2.4));
     let eng = 0, brake = 0;
-    const thr = AP ? AP.thr : kUp && !kDown ? 1 : 0, brk = AP ? AP.brk : kDown ? 1 : 0;
+    const pedal = on ? touchAxis.pedal : 0;      // touch pedal stick: up gas, down brake then reverse (analog)
+    const thr = AP ? AP.thr : kUp && !kDown ? 1 : Math.max(0, pedal), brk = AP ? AP.brk : kDown ? 1 : Math.max(0, -pedal);
     if (thr > 0) eng = -2500 * thr * Math.max(0, 1 - Math.pow(kmh / 205, 1.6)) * (vF < -0.5 ? 1.4 : 1);
     if (brk > 0) { if (vF > 0.8) brake = 60 * brk; else eng = 1100 * brk * Math.max(0, 1 - kmh / 35); }
     if (!thr && !brk) brake = on ? 4 : 0;
@@ -4169,7 +4202,7 @@ void main() {
   });
   const inst = new BABYLON.EngineInstrumentation(engine); inst.captureGPUFrameTime = true;
   const sinst = new BABYLON.SceneInstrumentation(scene); sinst.captureFrameTime = true;
-  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, detailAt, LVL, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
+  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, touchAxis, detailAt, LVL, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
     setPreset: (p) => { Object.assign(P, PRESETS[p]); updateAtmosphere(); applyLook(); },
     set: (o) => { Object.assign(P, o); updateAtmosphere(); applyLook(); },
     get frames() { return frames; }, get nodes() { return nodeCount; },
