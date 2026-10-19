@@ -4118,8 +4118,10 @@ void main() {
     let freed = 0;
     for (const g of scene.geometries) {
       if (!g.meshes.length || g.meshes.some((m) => m.isPickable)) continue;
+      // sub-mesh bounding boxes are filled only by refreshBoundingInfo (the transparent sort reads them): fill them while the
+      // positions still exist. Indices are kept (47 MB): with them gone Babylon rebuilds sub-meshes and loses their boxes
+      for (const m of g.meshes) { m.getBoundingInfo(); if (m.subMeshes) for (const sm of m.subMeshes) sm.refreshBoundingInfo(); }
       for (const k in g._vertexBuffers) { const b = g._vertexBuffers[k]._buffer; if (b && !b.isUpdatable() && b._data) { freed += b._data.byteLength || b._data.length * 4; b._data = null; } }
-      if (g._indices && g._indices.length) { freed += g._indices.byteLength || g._indices.length * 4; g._indices = []; }
     }
     for (const m of scene.meshes) {
       const s = m._thinInstanceDataStorage;
@@ -4142,7 +4144,11 @@ void main() {
     }
     // frame log for the first 40 frames: [gap since the last frame, time inside scene.render, of which per-frame callbacks] in ms
     const cb0 = Object.entries(PROF).reduce((a, [k, v]) => (k.startsWith('cb') ? a + v : a), 0), r0 = performance.now();
-    scene.render();
+    // errors inside Babylon reach window.onerror as a bare "Script error." (the CDN script is cross-origin): catch them here,
+    // show the message and where it came from, and stop rather than repeat it every frame
+    try { scene.render(); } catch (e) {
+      engine.stopRenderLoop(); const at = String((e && e.stack) || '').split('\n').slice(0, 4).map((l) => l.trim().replace(/https?:\/\/[^/]+\//, '')).join(' | ');
+      fail('Something went wrong while rendering: ' + ((e && e.message) || e) + ' [' + at + ']'); console.error(e); return; }
     const r1 = performance.now(), cb1 = Object.entries(PROF).reduce((a, [k, v]) => (k.startsWith('cb') ? a + v : a), 0);
     const FL = window.__frameLog = window.__frameLog || []; if (FL.length < 400) FL.push([Math.round(dt), Math.round(r1 - r0), Math.round(cb1 - cb0)]);
   });
