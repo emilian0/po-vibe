@@ -97,6 +97,21 @@
   // half the memory of Float32 copies, and decoding is linear, so it commutes with the bilinear filter below
   const HT = {}; LV.forEach((k, i) => { HT[k] = new Uint16Array(bins[i]); });
   const lvl = (k) => LVL[LV.indexOf(k)];
+  // ---------- GPU terrain: streamed windows (2026-10-19, streamed world phase 1) ----------
+  // The GPU keeps a square window of each level around the camera (S x S texels; toroidal: a texel lives at its level coordinates
+  // modulo S), filled from 64 x 64 tiles (tools/world/build_terrain_tiles.py) as the camera moves, so GPU memory no longer grows
+  // with the world. Desktop: S = 2048, whole levels, the same data as before. Phones: S = 1024 plus the derived 8, 32 and 128 m
+  // levels, so the ground past a fine window falls back to about twice the texel size. The CPU heights (physics, placement) above
+  // are unchanged. &notiles: the old whole-level path (level PNGs); &terrwin=<S> sets the window (1024 or 2048).
+  const TILES = QS.has('notiles') ? null : await getJSON(MAP + 'tiles/index.json').catch(() => null);
+  const S_WIN = TILES ? Math.min(2048, +(QS.get('terrwin') || (isMobile ? 1024 : 2048))) : N;
+  const NOLV = (QS.get('nolv') || '').split(',');      // &nolv=d8,d32: leave levels out (A/B)
+  const GLV = (TILES ? TILES.levels.filter((L) => (!L.derived || S_WIN < 2048) && !NOLV.includes(L.name)) : WORLD.levels.map((L) => ({ ...L, N, detail: !!L.detail })))
+    .map((L, i) => ({ ...L, i, half: L.extent / 2, cx: L.center[0], cz: L.center[1], win: L.N > S_WIN }));
+  { let d = 0; for (const L of GLV) L.dI = L.detail ? d++ : -1; }
+  const GNL = GLV.length, G_FAR = GNL - 1, G_MID = GLV.findIndex((L) => L.name === 'mid'), G_ND = GLV.filter((L) => L.detail).length;
+  if (GLV[G_FAR].win || GLV.some((L) => L.N < S_WIN)) throw new Error('terrain levels do not fit the window size ' + S_WIN);
+  const WR1 = S_WIN / 2 - 1.5 * (TILES ? TILES.T : 64) - 2, WR0 = WR1 - Math.min(128, WR1 * 0.3);      // window fade, in texels from the camera
   const sampleLevel = (k, x, z) => {
     const L = lvl(k), gx = (x - (L.cx - L.half)) / L.res - 0.5, gz = ((L.cz + L.half) - z) / L.res - 0.5;
     const ix = Math.max(0, Math.min(N - 2, Math.floor(gx))), iz = Math.max(0, Math.min(N - 2, Math.floor(gz))), fx = Math.min(1, Math.max(0, gx - ix)), fz = Math.min(1, Math.max(0, gz - iz));
@@ -259,9 +274,10 @@ bool inTunnelMouth(vec3 p) {
   // medium measured within ~20 MB of low), and the resolution adapts to the GPU anyway
   if (!TIERS[tierName]) tierName = isMobile ? 'medium' : benchMs < 1.0 ? 'ultra' : benchMs < 2.2 ? 'high' : benchMs < 7 ? 'medium' : 'low';     // AMD Radeon Pro 5500M ~3 ms -> medium
   const Q = Object.assign({}, TIERS[tierName]);
-  // phone tuning: no multisampling (4x MSAA buffers; the phone crashed with it) and the resolution may climb to 2 device px per
-  // CSS px, which sharpens a phone screen more than MSAA would
-  if (isMobile && tierName === 'medium') { Q.msaa = 1; Q.scale = [0.6, DPR, 1.0]; }
+  // phone tuning: the resolution may climb to 2 device px per CSS px, which sharpens a phone screen more than MSAA would. 4x MSAA was
+  // off on phones while memory was tight (the phone crashed with it at ~930 MB); with the streamed world (~300 MB at phone size,
+  // 2026-10-19) it is back on: smooth edges on trees, roofs and the road, and alpha-to-coverage foliage. &q.msaa=1 turns it off.
+  if (isMobile && tierName === 'medium') { Q.scale = [0.6, DPR, 1.0]; }
   for (const [k, v] of QS) if (k.startsWith('q.') && k.slice(2) in Q && !Array.isArray(Q[k.slice(2)])) Q[k.slice(2)] = +v;      // test overrides, e.g. &q.msaa=1
   const SAFE = { on: false };     // set by the frame watchdog: drops the expensive passes after very long frames
   console.log('GPU benchmark', benchMs.toFixed(2), 'ms ->', tierName);
@@ -451,26 +467,39 @@ vec3 aerial(vec3 col, vec3 wpos) {
   // level lookup, generated for however many levels the world has: heights (manual bilinear from an R32F array), normals,
   // detail maps (A: scree, outcrop, gully, canopy; B: road distance, vineyard, orchard/olive, urban) and one shadow texture per level
   const GL_LEVELS = `
-uniform highp usampler2DArray hArr;      // 16-bit height codes (R16UI), decoded per level by lvHf
-uniform float lvHf[${NL * 2}];
+uniform highp usampler2DArray hArr;      // 16-bit height codes (R16UI), decoded per level by lvHf, in S x S windows (toroidal)
+uniform float lvHf[${GNL * 2}];
 float hTex(ivec3 p) { return lvHf[p.z * 2] + lvHf[p.z * 2 + 1] * float(texelFetch(hArr, p, 0).r); }
-uniform float lvDf[${NL * 4}];          // per level: centre x, centre z, half extent, texel size (floats: settable from ProceduralTexture too)
+uniform float lvDf[${GNL * 4}];          // per level: centre x, centre z, half extent, texel size (floats: settable from ProceduralTexture too)
+uniform float lvWf[${GNL * 4}];          // per level: the valid window in level texels (x0, y0, x1, y1), whole levels -0.5 .. N + 0.5
+uniform vec2 strC;                      // streaming centre (the camera), world x z
 uniform float patchCf[${PATCH_C.length * 3}];     // per patch: centre x, z, vertical offset
 vec4 LVD(int i) { return vec4(lvDf[i * 4], lvDf[i * 4 + 1], lvDf[i * 4 + 2], lvDf[i * 4 + 3]); }
 vec3 PATCHC(int i) { return vec3(patchCf[i * 3], patchCf[i * 3 + 1], patchCf[i * 3 + 2]); }
-const int NL = ${NL}, FAR_I = ${FAR_I}, MID_I = ${MID_I};
+const int NL = ${GNL}, FAR_I = ${G_FAR}, MID_I = ${G_MID};
+vec4 LVR(int i) { return vec4(lvWf[i * 4], lvWf[i * 4 + 1], lvWf[i * 4 + 2], lvWf[i * 4 + 3]); }
+bool lvWin(int i) { return ${GLV.filter((L) => L.win).map((L) => `i == ${L.i}`).join(' || ') || 'false'}; }
+vec2 lvG(int i, vec2 xz) { vec4 L = LVD(i); return vec2(xz.x - (L.x - L.z), (L.y + L.z) - xz.y) / L.w; }      // level texel coordinates
+// level weight: inside the level's extent (faded at its edge) and, for a streamed level, near the camera and inside the loaded window
 float lvW(int i, vec2 xz) {
   if (i == FAR_I) return 1.0;
   vec4 L = LVD(i); float m = max(abs(xz.x - L.x), abs(xz.y - L.y));
   float edge = 2.0 * L.w, fade = max(250.0, 40.0 * L.w);
-  return 1.0 - smoothstep(L.z - edge - fade, L.z - edge, m);
+  float w = 1.0 - smoothstep(L.z - edge - fade, L.z - edge, m);
+  if (lvWin(i)) {
+    vec2 g = lvG(i, xz); vec4 r = LVR(i);
+    float c = max(abs(xz.x - strC.x), abs(xz.y - strC.y)) / L.w;
+    w *= (1.0 - smoothstep(${WR0.toFixed(1)}, ${WR1.toFixed(1)}, c)) * step(r.x + 1.0, g.x) * step(g.x, r.z - 1.0) * step(r.y + 1.0, g.y) * step(g.y, r.w - 1.0);
+  }
+  return w;
 }
-vec2 lvUV(int i, vec2 xz) { vec4 L = LVD(i); return vec2(xz.x - (L.x - L.z), (L.y + L.z) - xz.y) / (2.0 * L.z); }
+// texture coordinates in the window texture (wrapping): clamped to the valid window, which is CLAMP_TO_EDGE on a whole level
+vec2 lvUV(int i, vec2 xz) { vec4 r = LVR(i); return clamp(lvG(i, xz), r.xy + 1.0, r.zw - 1.0) / ${S_WIN.toFixed(1)}; }
 float hFetchL(int i, vec2 xz) {
-  vec4 L = LVD(i);
-  vec2 g = vec2(xz.x - (L.x - L.z), (L.y + L.z) - xz.y) / L.w - 0.5;
+  vec2 g = lvG(i, xz) - 0.5; vec4 r = LVR(i);
   vec2 f = fract(g); ivec2 c = ivec2(floor(g));
-  ivec2 c0 = clamp(c, ivec2(0), ivec2(${N - 1})), c1 = clamp(c + 1, ivec2(0), ivec2(${N - 1}));
+  ivec2 lo = ivec2(ceil(r.xy)), hi = ivec2(floor(r.zw)) - 1;
+  ivec2 c0 = clamp(c, lo, hi) & ${S_WIN - 1}, c1 = clamp(c + 1, lo, hi) & ${S_WIN - 1};
   float a = hTex(ivec3(c0, i)), b = hTex(ivec3(c1.x, c0.y, i)), cc = hTex(ivec3(c0.x, c1.y, i)), d = hTex(ivec3(c1, i));
   return mix(mix(a, b, f.x), mix(cc, d, f.x), f.y);
 }
@@ -480,6 +509,10 @@ float heightAt(vec2 xz) {
   for (int i = NL - 1; i >= 0; i--) { if (i >= b) continue; float w = lvW(i, xz); if (w > 0.0) h = mix(h, hFetchL(i, xz), w); }
   return h;
 }
+// the coarse level for long rays (shadows, water reflections): mid or the next one that covers the point
+int coarseL(vec2 xz) { ${GLV.slice(G_MID, G_FAR).map((L) => `if (lvW(${L.i}, xz) >= 1.0) return ${L.i};`).join(' ')} return FAR_I; }
+// mid's 16 m normals where loaded (the slope test for big walls), else the next coarser level
+int slopeL(vec2 xz) { ${GLV.slice(G_MID, G_FAR).map((L) => `if (lvW(${L.i}, xz) >= 1.0) return ${L.i};`).join(' ')} return ${GLV[G_MID].win ? 'FAR_I' : 'MID_I'}; }
 // weight of the fine (<= 4 m) levels at a point: where instanced detail (trees, rocks, grass) exists
 float fineW(vec2 xz) { float w = 0.0; for (int i = 0; i < NL; i++) if (LVD(i).w <= 4.0) w = max(w, lvW(i, xz)); return w; }
 // share of one patch at a point (soft: the regions blend over a few km)
@@ -490,15 +523,16 @@ float patchOffset(vec2 xz) { float ws = 0.0, o = 0.0; for (int i = 0; i < ${PATC
 uniform highp sampler2DArray nArr; uniform highp sampler2DArray aArr; uniform highp sampler2DArray bArr;
 // level weights for the current point, computed once and reused; loops unrolled at build time (constant indices:
 // dynamic indexing into local arrays and samplers is slow on many GPUs). Coarsest first, finer levels blended over it.
-${LVL.map((L) => `float cW${L.i};`).join(' ')}
-void levelSetup(vec2 xz) { ${LVL.map((L) => `cW${L.i} = lvW(${L.i}, xz);`).join(' ')} }
+${GLV.map((L) => `float cW${L.i};`).join(' ')}
+void levelSetup(vec2 xz) { ${GLV.map((L) => `cW${L.i} = lvW(${L.i}, xz);`).join(' ')} }
 ${['nArr', 'aArr', 'bArr'].map((t) => {
-    const last = t === 'nArr' ? FAR_I : FAR_I - 1;
-    const T = (i) => `texture(${t}, vec3(lvUV(${i}, xz), ${i}.0))`;
+    // the levels holding this map (normals: all; detail: the detail levels, packed in their own layers), the last one unconditional
+    const lv = t === 'nArr' ? GLV : GLV.filter((L) => L.detail), last = lv.length - 1;
+    const T = (L) => `texture(${t}, vec3(lvUV(${L.i}, xz), ${t === 'nArr' ? L.i : L.dI}.0))`;
     // base = finest level covering the point fully (one fetch in the common case), then finer partial levels blended over it
-    let body = `if (cW0 >= 1.0) return ${T(0)}; vec4 v; int b;`;
-    for (let i = 1; i <= last; i++) body += ` ${i > 1 ? 'else ' : ''}if (${i === last ? 'true' : `cW${i} >= 1.0`}) { v = ${T(i)}; b = ${i}; }`;
-    for (let i = last - 1; i >= 0; i--) body += ` if (${i} < b && cW${i} > 0.0) v = mix(v, ${T(i)}, cW${i});`;
+    let body = `if (cW${lv[0].i} >= 1.0) return ${T(lv[0])}; vec4 v; int b;`;
+    for (let k = 1; k <= last; k++) body += ` ${k > 1 ? 'else ' : ''}if (${k === last ? 'true' : `cW${lv[k].i} >= 1.0`}) { v = ${T(lv[k])}; b = ${lv[k].i}; }`;
+    for (let k = last - 1; k >= 0; k--) body += ` if (${lv[k].i} < b && cW${lv[k].i} > 0.0) v = mix(v, ${T(lv[k])}, cW${lv[k].i});`;
     return `vec4 chain_${t}(vec2 xz) { ${body} return v; }`;
   }).join('\n')}
 vec4 nrmData(vec2 xz) { return chain_nArr(xz); }
@@ -506,15 +540,15 @@ vec4 detailA(vec2 xz) { return chain_aArr(xz); }
 vec4 detailB(vec2 xz) { return chain_bArr(xz); }
 `;
   const GL_SHADOWED = `
-${LVL.map((L) => `uniform sampler2D s${L.i};`).join(' ')}
-float shadowL(int i, vec2 uv) { ${LVL.map((L) => `if (i == ${L.i}) return texture2D(s${L.i}, uv).r;`).join(' ')} return 1.0; }
+uniform highp sampler2DArray shArr;
+float shadowL(int i, vec2 uv) { return texture(shArr, vec3(uv, float(i))).r; }
 float sunShadow(vec2 xz) {
   int b = baseLevel(xz); float s = shadowL(b, lvUV(b, xz));
   for (int i = NL - 1; i >= 0; i--) { if (i >= b) continue; float w = lvW(i, xz); if (w > 0.0) s = mix(s, shadowL(i, lvUV(i, xz)), w); }
   return s;
 }
 `;
-  const LEVEL_UNIFORMS = ['lvDf', 'lvHf', 'patchCf'], LEVEL_SAMPLERS = ['hArr', ...LVL.map((L) => 's' + L.i)];
+  const LEVEL_UNIFORMS = ['lvDf', 'lvHf', 'lvWf', 'strC', 'patchCf'], LEVEL_SAMPLERS = ['hArr', 'shArr'];
 
   // ---------- the car on the ground: a sun-projected mask of a low-poly stand-in (soft, follows the car) and an analytic contact shadow ----------
   const GL_CAR = `
@@ -607,37 +641,135 @@ float carAO(vec3 p) {
     const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0); const d = cx.getImageData(0, 0, w, h).data;
     if (bmp.close) bmp.close(); cv.width = cv.height = 0; return d;
   };
-  // GPU arrays are built in a block so the staging copies (300+ MB) are freed after upload (the engine keeps no copies either)
-  let hArr, nArr, aArr, bArr;
-  // CPU detail lookups need three answers only: one byte per texel, bit 0 open ground for grass (no canopy, scree, outcrop, town,
-  // vines or orchards), bit 1 vineyard, bit 2 orchard/olive. 4 MB per detail level instead of two 16 MB copies.
+  // terrain tile streaming: per level, a target window (tile-aligned, around the camera) and a committed window (every tile in it is
+  // in the texture; the shaders use only that). Before a new tile overwrites a slot whose old tile is still committed, the committed
+  // window shrinks to its overlap with the target (the slots new tiles take only held tiles outside the target); once every tile of
+  // the target has arrived, the committed window grows to it. A camera jump and back (a shot, a reset) costs nothing: tiles of a
+  // target that was left are dropped on arrival. Nearest tiles load first, 12 at a time.
+  function terrainStream(T, S, upload) {
+    const TPL = S / T, st = GLV.map((L) => ({ L, tgt: L.win ? null : [0, 0], slot: new Int32Array(TPL * TPL).fill(-1), done: false }));
+    let queue = [], inflight = 0, dirty = true, fails = 0, cx0 = 0, cz0 = 0;
+    const wanted = new Set(), api = { onTile: null, loaded: 0, bytes: 0 };
+    const setCom = (i, r) => { lvWArr.set(r, i * 4); dirty = true; };
+    const inTgt = (s, tx, ty) => { const o = s.tgt; return o && tx * T >= o[0] && tx * T < o[0] + S && ty * T >= o[1] && ty * T < o[1] + S; };
+    const slotOf = (tx, ty) => (ty % TPL) * TPL + (tx % TPL);
+    const complete = (s) => { const o = s.tgt, nt = s.L.N / T;
+      for (let ty = o[1] / T; ty < (o[1] + S) / T; ty++) for (let tx = o[0] / T; tx < (o[0] + S) / T; tx++) if (tx < nt && ty < nt && s.slot[slotOf(tx, ty)] !== ty * nt + tx) return false;
+      return true; };
+    const decode = (u8) => {
+      const n = T * T, np = u8.length / n, h = new Uint16Array(n);
+      for (let y = 0; y < T; y++) { let acc = 0; const o = y * T; for (let x = 0; x < T; x++) { acc = (acc + (u8[o + x] | (u8[n + o + x] << 8))) & 0xFFFF; h[o + x] = acc; } }
+      const rgba = (p0) => { const out = new Uint8Array(n * 4);
+        for (let c = 0; c < 4; c++) { const b = (p0 + c) * n; for (let y = 0; y < T; y++) { let acc = 0; const o = y * T; for (let x = 0; x < T; x++) { acc = (acc + u8[b + o + x]) & 255; out[(o + x) * 4 + c] = acc; } } }
+        return out; };
+      return { h, n: rgba(2), a: np >= 14 ? rgba(6) : null, b: np >= 14 ? rgba(10) : null };
+    };
+    const load = async (s, tx, ty, key) => {
+      inflight++;
+      try {
+        let buf = null;
+        for (let k = 0; k < 3 && !buf; k++) { try { const r = await fetch(assetUrl(MAP + 'tiles/' + s.L.name + '/' + ty + '_' + tx + '.pt')); if (r.ok) buf = await r.arrayBuffer(); } catch (_) { /* retried */ } }
+        if (!buf) { if (fails++ < 3) console.error('terrain tile failed', s.L.name, ty, tx); return; }
+        const head = new Uint8Array(buf, 0, 5); if (head[0] !== 80 || head[1] !== 84 || head[2] !== 49 || head[3] !== T) throw new Error('bad terrain tile ' + key);
+        const u8 = new Uint8Array(await inflate(buf.slice(5)));
+        if (!inTgt(s, tx, ty)) return;      // the window moved on
+        const nt = s.L.N / T, old = s.slot[slotOf(tx, ty)], c = lvWArr.subarray(s.L.i * 4, s.L.i * 4 + 4);
+        if (old >= 0 && (old % nt) * T >= c[0] && (old % nt) * T < c[2] && ((old / nt) | 0) * T >= c[1] && ((old / nt) | 0) * T < c[3]) {
+          const o = s.tgt, r = [Math.max(c[0], o[0]), Math.max(c[1], o[1]), Math.min(c[2], o[0] + S), Math.min(c[3], o[1] + S)];
+          setCom(s.L.i, r[2] > r[0] && r[3] > r[1] ? r : [0, 0, 0, 0]);
+        }
+        upload(s.L, (tx % TPL) * T, (ty % TPL) * T, decode(u8));
+        s.slot[slotOf(tx, ty)] = ty * nt + tx; api.loaded++; api.bytes += buf.byteLength;
+        if (api.onTile) api.onTile(s.L, tx, ty);
+        if (!s.done && complete(s)) { s.done = true; const o = s.tgt; setCom(s.L.i, s.L.win ? [o[0], o[1], o[0] + S, o[1] + S] : [-0.5, -0.5, s.L.N + 0.5, s.L.N + 0.5]); }
+      } finally { inflight--; wanted.delete(key); pump(); }
+    };
+    const pump = () => {
+      if (queue.length > 1 && api.sortAt !== api.loaded) { queue.sort((a, b) => a.d - b.d); api.sortAt = api.loaded; }
+      while (inflight < 12 && queue.length) {
+        const j = queue.shift();
+        if (!inTgt(j.s, j.tx, j.ty) || j.s.slot[slotOf(j.tx, j.ty)] === j.ty * (j.s.L.N / T) + j.tx) { wanted.delete(j.key); continue; }
+        load(j.s, j.tx, j.ty, j.key);
+      }
+    };
+    const enqueue = (s) => {
+      const o = s.tgt, nt = s.L.N / T, L = s.L;
+      for (let ty = o[1] / T; ty < Math.min(nt, (o[1] + S) / T); ty++) for (let tx = o[0] / T; tx < Math.min(nt, (o[0] + S) / T); tx++) {
+        const key = L.i + ':' + ty + '_' + tx;
+        if (s.slot[slotOf(tx, ty)] === ty * nt + tx || wanted.has(key)) continue;
+        const wx = L.cx - L.half + (tx + 0.5) * T * L.res, wz = L.cz + L.half - (ty + 0.5) * T * L.res;
+        wanted.add(key); queue.push({ s, tx, ty, key, d: Math.max(Math.abs(wx - cx0), Math.abs(wz - cz0)) });
+      }
+    };
+    api.update = (cx, cz) => {
+      cx0 = cx; cz0 = cz; strC.set(cx, cz);
+      for (const s of st) {
+        if (!s.L.win) continue;
+        const L = s.L, gx = (cx - (L.cx - L.half)) / L.res, gy = ((L.cz + L.half) - cz) / L.res;
+        if (s.tgt && Math.abs(gx - (s.tgt[0] + S / 2)) <= 0.75 * T && Math.abs(gy - (s.tgt[1] + S / 2)) <= 0.75 * T) continue;
+        const ox = Math.max(0, Math.min(L.N - S, Math.round((gx - S / 2) / T) * T)), oy = Math.max(0, Math.min(L.N - S, Math.round((gy - S / 2) / T) * T));
+        if (s.tgt && s.tgt[0] === ox && s.tgt[1] === oy) continue;
+        s.tgt = [ox, oy]; s.done = complete(s);
+        if (s.done) setCom(L.i, [ox, oy, ox + S, oy + S]); else enqueue(s);
+        if (api.onMove) api.onMove(L, s.tgt);
+      }
+      pump();
+      for (const m of levelMats) { m.setVector2('strC', strC); if (dirty) m.setFloats('lvWf', lvWArr); }
+      dirty = false;
+    };
+    api.prime = async (cx, cz) => {
+      cx0 = cx; cz0 = cz; api.update(cx, cz);
+      for (const s of st) if (!s.L.win) enqueue(s);
+      pump();
+      while (queue.length || inflight) await new Promise((r) => setTimeout(r, 15));
+    };
+    api.target = (L) => st[L.i].tgt;
+    api.check = () => {      // tests: every tile inside a committed window must be the one in its slot
+      const bad = [];
+      for (const s of st) { const c = lvWArr.subarray(s.L.i * 4, s.L.i * 4 + 4), nt = s.L.N / T;
+        for (let ty = Math.max(0, Math.ceil(c[1] / T)); ty * T < Math.min(c[3], s.L.N); ty++) for (let tx = Math.max(0, Math.ceil(c[0] / T)); tx * T < Math.min(c[2], s.L.N); tx++)
+          if (s.slot[slotOf(tx, ty)] !== ty * nt + tx) bad.push(s.L.name + ' ' + ty + '_' + tx); }
+      return bad;
+    };
+    api.state = () => ({ queue: queue.length, inflight, levels: st.map((s) => s.L.name + (s.done ? ' ok ' : ' .. ') + (s.tgt || []).join(',') + ' com ' + Array.from(lvWArr.subarray(s.L.i * 4, s.L.i * 4 + 4)).join(',')) });
+    api.pending = () => queue.length + inflight + st.filter((s) => !s.done).length;
+    window.__terrainStream = api;
+    return api;
+  }
+  // GPU arrays are built in a block so the staging copies are freed after upload (the engine keeps no copies either)
+  let hArr, nArr, aArr, bArr, TSTREAM = null;
+  // CPU detail lookups need a few answers only: one byte per texel, bit 0 open ground for grass (no canopy, scree, outcrop, town,
+  // vines or orchards), bit 1 vineyard, bit 2 orchard/olive, bit 3 scree or outcrop, bit 4 forest floor. 4 MB per detail level.
   const DETAIL_F = {};
+  const lvWArr = new Float32Array(GNL * 4), strC = new BABYLON.Vector2(0, 0), levelMats = [];
+  GLV.forEach((L, i) => lvWArr.set(L.win ? [0, 0, 0, 0] : [-0.5, -0.5, L.N + 0.5, L.N + 0.5], i * 4));
+  const inflate = async (buf) => new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
   {
-    // no mipmaps: Babylon does not build them for raw 2D arrays, and sampling missing levels returned garbage at distance
-    // texture arrays allocated empty on the GPU and filled one level (layer) at a time, straight from each decoded map: no
-    // 100 MB staging copies (they made the live loading peak, 2026-10-19). Wrapped as Babylon textures like the KTX2 arrays.
-    const gl = engine._gl;
-    const gpuArray = (internal, filter) => {
-      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, internal, N, N, NL);
+    // texture arrays allocated empty on the GPU (S x S per layer, no mipmaps: none were ever built for these arrays) and filled
+    // piece by piece: whole layers on the old path, 64 x 64 tiles when streaming. Wrapped as Babylon textures like the KTX2 arrays.
+    const gl = engine._gl, S = S_WIN;
+    const gpuArray = (internal, filter, layers) => {
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, internal, S, S, Math.max(1, layers));
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache();
       const it = new BABYLON.InternalTexture(engine, BABYLON.InternalTextureSource.Raw2DArray);
-      it.baseWidth = it.width = N; it.baseHeight = it.height = N; it.baseDepth = it.depth = NL; it.is2DArray = true; it.generateMipMaps = false;
+      it.baseWidth = it.width = S; it.baseHeight = it.height = S; it.baseDepth = it.depth = Math.max(1, layers); it.is2DArray = true; it.generateMipMaps = false;
       it._hardwareTexture = new BABYLON.WebGLHardwareTexture(tex, gl); it.isReady = true;
       engine.updateTextureSamplingMode(filter, it);
-      const bt = new BABYLON.BaseTexture(scene, it); bt.wrapU = bt.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
-      bt.layer = (i, format, type, data) => { gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, N, N, 1, format, type, data); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache(); };
+      const bt = new BABYLON.BaseTexture(scene, it); bt.wrapU = bt.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;      // windows wrap (lvUV clamps)
+      bt.put = (i, x, y, w, h, format, type, data) => { gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, x, y, i, w, h, 1, format, type, data); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache(); };
+      bt.layer = (i, format, type, data) => bt.put(i, 0, 0, S, S, format, type, data);
       return bt;
     };
-    // no mipmaps: none were ever built for these arrays (sampling missing levels returned garbage at distance)
-    hArr = gpuArray(gl.R16UI, BABYLON.Texture.NEAREST_SAMPLINGMODE);
-    LV.forEach((k, i) => hArr.layer(i, gl.RED_INTEGER, gl.UNSIGNED_SHORT, HT[k]));
-    nArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE);
-    for (const L of LVL) nArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, await imgBytes(MAP + L.name + '_n.png'));
-    mark('normal maps uploaded');
-    aArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE); bArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE);
-    for (const L of LVL) {
-      if (L.detail) {
+    hArr = gpuArray(gl.R16UI, BABYLON.Texture.NEAREST_SAMPLINGMODE, GNL);
+    nArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE, GNL);
+    aArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE, G_ND); bArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE, G_ND);
+    if (!TILES) {      // the old path (&notiles, or no tiles built): whole levels from the level maps
+      GLV.forEach((L) => hArr.layer(L.i, gl.RED_INTEGER, gl.UNSIGNED_SHORT, HT[L.name]));
+      for (const L of GLV) nArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, await imgBytes(MAP + L.name + '_n.png'));
+      mark('normal maps uploaded');
+      for (const L of GLV) {
+        if (!L.detail) continue;
         const m = await imgBytes(MAP + L.name + '_m.png'), c = await imgBytes(MAP + L.name + '_c.png'), r = await imgBytes(MAP + L.name + '_r.png'), lu = await imgBytes(MAP + L.name + '_l.png');
         const aL = new Uint8Array(N * N * 4), bL = new Uint8Array(N * N * 4);
         const F = new Uint8Array(N * N);
@@ -645,15 +777,27 @@ float carAO(vec3 p) {
           aL[q] = m[q]; aL[q + 1] = m[q + 1]; aL[q + 2] = m[q + 2]; aL[q + 3] = c[q];
           bL[q] = r[q]; bL[q + 1] = lu[q]; bL[q + 2] = lu[q + 1]; bL[q + 3] = lu[q + 2];
           const scree = m[q], outcrop = m[q + 1], canopy = c[q], vine = lu[q], orchard = lu[q + 1], urban = lu[q + 2];
-          F[p] = (canopy < 8 && scree < 90 && outcrop < 170 && urban < 60 && vine < 60 && orchard < 60 ? 1 : 0) | (vine >= 140 ? 2 : 0) | (orchard >= 140 ? 4 : 0); }
+          F[p] = (canopy < 8 && scree < 90 && outcrop < 170 && urban < 60 && vine < 60 && orchard < 60 ? 1 : 0) | (vine >= 140 ? 2 : 0) | (orchard >= 140 ? 4 : 0)
+            | (scree > 90 || outcrop > 170 ? 8 : 0) | (canopy > 12 ? 16 : 0); }
         DETAIL_F[L.name] = F;
-        aArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, aL); bArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, bL);
-      }      // levels without detail maps (far) keep an empty layer: the shader never reads it
+        aArr.layer(L.dI, gl.RGBA, gl.UNSIGNED_BYTE, aL); bArr.layer(L.dI, gl.RGBA, gl.UNSIGNED_BYTE, bL);
+      }
+      mark('detail maps uploaded');
+    } else {
+      for (const L of LVL) if (L.detail) DETAIL_F[L.name] = new Uint8Array(await inflate(await getBin(MAP + 'tiles/flags/' + L.name + '.f')));
+      TSTREAM = terrainStream(TILES.T, S, (L, sx, sy, t) => {
+        hArr.put(L.i, sx, sy, TILES.T, TILES.T, gl.RED_INTEGER, gl.UNSIGNED_SHORT, t.h);
+        nArr.put(L.i, sx, sy, TILES.T, TILES.T, gl.RGBA, gl.UNSIGNED_BYTE, t.n);
+        if (L.detail) { aArr.put(L.dI, sx, sy, TILES.T, TILES.T, gl.RGBA, gl.UNSIGNED_BYTE, t.a); bArr.put(L.dI, sx, sy, TILES.T, TILES.T, gl.RGBA, gl.UNSIGNED_BYTE, t.b); }
+      });
+      // first windows around the start (the default spawn, or &road=); a shot elsewhere streams in on its first frames
+      const sp = ROUTE_PTS[QS.has('road') ? Math.min(ROUTE_PTS.length - 1, +QS.get('road')) : 0];
+      await TSTREAM.prime(sp[0], sp[2]);
+      mark('terrain tiles uploaded');
     }
-    mark('detail maps uploaded');
   }
-  const lvHArr = LVL.flatMap((L) => [L.offset, L.scale]);
-  const lvDArr = LVL.flatMap((L) => [L.cx, L.cz, L.half, L.res]), patchCArr = PATCH_C.flat();
+  const lvHArr = GLV.flatMap((L) => [L.offset, L.scale]);
+  const lvDArr = GLV.flatMap((L) => [L.cx, L.cz, L.half, L.res]), patchCArr = PATCH_C.flat();
   // CPU lookup of the detail maps at a world point (finest covering detail level)
   const detailAt = (x, z) => {
     for (const L of LVL) { if (!L.detail || levelWeight(L, x, z) < 0.5) continue;
@@ -732,9 +876,12 @@ float carAO(vec3 p) {
 
   // ---------- sun shadows on the terrain: one GPU pass per level whenever the sun moves ----------
   BABYLON.Effect.ShadersStore.terrainShadowPixelShader = GL_COMMON.replace('precision highp float;', 'precision highp float;\nvarying vec2 vUV;') + GL_LEVELS + `
-uniform vec4 thisL; uniform float pen; uniform float cheap;
+uniform vec4 thisL; uniform vec4 thisW; uniform float pen; uniform float cheap;
 void main() {
-  vec2 xz = vec2(thisL.x - thisL.z + vUV.x * 2.0 * thisL.z, thisL.y + thisL.z - vUV.y * 2.0 * thisL.z);
+  // thisW: the level's target window origin (level texels), the texture's span in level texels, 1 if streamed. A texel of a streamed
+  // window holds the level texel congruent to it (mod the span) inside the window.
+  vec2 tw = vUV * thisW.z, g = thisW.w > 0.5 ? thisW.xy + mod(tw - thisW.xy, thisW.z) : tw;
+  vec2 xz = vec2(thisL.x - thisL.z + g.x * thisL.w, thisL.y + thisL.z - g.y * thisL.w);
   float h0 = heightAt(xz) + 1.5;
   vec2 sd = normalize(sunDir.xz + 1e-5); float tanE = sunDir.y / max(length(sunDir.xz), 1e-4);
   float t = max(thisL.w * 0.75, 1.5), occ = -1e9;
@@ -744,7 +891,7 @@ void main() {
     if (i >= n) break;
     vec2 q = xz + sd * t;
     // full level blend only near the texel; further out one coarse level (4 fetches) is enough for a ridge's shadow
-    float hq = (t < 600.0 && cheap < 0.5) ? heightAt(q) : hFetchL(lvW(MID_I, q) >= 1.0 ? MID_I : FAR_I, q);
+    float hq = (t < 600.0 && cheap < 0.5) ? heightAt(q) : hFetchL(coarseL(q), q);
     occ = max(occ, (hq - h0) / t);
     if (occ > tanE + pen) break;      // already fully shadowed
     t *= grow;
@@ -754,43 +901,77 @@ void main() {
   float s = smoothstep(-pen, pen, tanE - occ);
   gl_FragColor = vec4(s, s, s, 1.0);
 }`;
-  const shadowTex = {};
-  for (const L of LVL) {
-    const size = L.i === 0 ? Q.shadowNear : L.res <= 4 ? 2048 : 1024;
-    const pt = new BABYLON.ProceduralTexture('shadow_' + L.name, size, 'terrainShadow', scene, null, false, false);
-    pt.refreshRate = 0; pt.wrapU = pt.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
-    pt.setTexture('hArr', hArr); pt.setFloats('lvDf', lvDArr); pt.setFloats('lvHf', lvHArr); pt.setFloats('patchCf', patchCArr);
-    pt.setVector4('thisL', new BABYLON.Vector4(L.cx, L.cz, L.half, L.res)); pt.setTexture('skyLUT', skyLUT); pt.setVector3('sunDir', new V3(0, 1, 0)); pt.setFloat('pen', 0.02); pt.setFloat('cheap', 1);   // every uniform must be set before the effect compiles
-    pt.isEnabled = false; pt.autoClear = false; pt.size_ = size;
+  // the shadows of all levels live in one R8 texture array, a layer per level at one shadow texel per level texel and wrapped like the
+  // level windows (one sampler instead of one per level: with nine levels a shader ran past the 16 texture units a GPU, and an
+  // iPhone, allows). Each job renders into one scratch procedural texture (the whole layer cheaply, or a tile at full quality, GL
+  // scissor) and is copied into its layer at once.
+  const shArr = (() => {
+    const gl = engine._gl, S = S_WIN, tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, S, S, GNL);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache();
+    const it = new BABYLON.InternalTexture(engine, BABYLON.InternalTextureSource.Raw2DArray);
+    it.baseWidth = it.width = S; it.baseHeight = it.height = S; it.baseDepth = it.depth = GNL; it.is2DArray = true; it.generateMipMaps = false;
+    it._hardwareTexture = new BABYLON.WebGLHardwareTexture(tex, gl); it.isReady = true;
+    engine.updateTextureSamplingMode(BABYLON.Texture.BILINEAR_SAMPLINGMODE, it);
+    const bt = new BABYLON.BaseTexture(scene, it); bt.wrapU = bt.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE; bt.glTex_ = tex;
+    return bt;
+  })();
+  const shadowPT = new BABYLON.ProceduralTexture('terrainShadowPass', S_WIN, 'terrainShadow', scene, null, false, false);
+  {
+    const pt = shadowPT, L = GLV[0];
+    pt.refreshRate = 0; pt.isEnabled = false; pt.autoClear = false;
+    pt.setTexture('hArr', hArr); pt.setFloats('lvDf', lvDArr); pt.setFloats('lvHf', lvHArr); pt.setFloats('patchCf', patchCArr); pt.setFloats('lvWf', lvWArr); pt.setVector2('strC', strC); levelMats.push(pt);
+    pt.setVector4('thisL', new BABYLON.Vector4(L.cx, L.cz, L.half, L.res)); pt.setVector4('thisW', new BABYLON.Vector4(0, 0, S_WIN, 0)); pt.setTexture('skyLUT', skyLUT); pt.setVector3('sunDir', new V3(0, 1, 0)); pt.setFloat('pen', 0.02); pt.setFloat('cheap', 1);   // every uniform must be set before the effect compiles
     // a tile, when set, limits the pass to that rectangle (GL scissor); off again right after
     pt.onBeforeGenerationObservable.add(() => { const tl = pt.tile_; if (!tl) return; const gl = engine._gl; gl.enable(gl.SCISSOR_TEST); gl.scissor(tl[0], tl[1], tl[2], tl[3]); });
-    pt.onGeneratedObservable.add(() => { const gl = engine._gl; gl.disable(gl.SCISSOR_TEST); pt.isEnabled = false; });
-    shadowTex[L.name] = pt;
+    pt.onGeneratedObservable.add(() => { const gl = engine._gl; gl.disable(gl.SCISSOR_TEST); });
   }
-  // terrain shadows are rendered in pieces: one cheap full-texture pass per level, then 256 px tiles at full quality,
-  // a pixel budget per frame. No single GPU submission is ever a whole 2048 px ray-march (that stalled the GPU for seconds).
+  let shadowReadFb = null;
+  const runShadowJob = (j) => {
+    const gl = engine._gl, pt = shadowPT, L = GLV[j.li], o = TSTREAM && L.win ? TSTREAM.target(L) : [0, 0];
+    pt.setVector4('thisL', new BABYLON.Vector4(L.cx, L.cz, L.half, L.res)); pt.setVector4('thisW', new BABYLON.Vector4(o[0], o[1], S_WIN, L.win ? 1 : 0));
+    pt.setFloat('cheap', j.cheap); pt.tile_ = j.tile; pt.render();
+    const it = pt.getInternalTexture(), src = it && it._hardwareTexture && it._hardwareTexture.underlyingResource; if (!src) return;
+    const prevRead = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+    if (!shadowReadFb) shadowReadFb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, shadowReadFb); gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src, 0);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, shArr.glTex_);
+    const t = j.tile || [0, 0, S_WIN, S_WIN]; gl.copyTexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, t[0], t[1], j.li, t[0], t[1], t[2], t[3]);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead); engine.resetTextureCache();
+  };
+  // a streamed tile gets its shadow at full quality right away (its window texels held another tile's shadow)
+  if (TSTREAM) TSTREAM.onTile = (L, tx, ty) => { if (!L.win) return; const T = TILES.T; shadowJobs.push({ li: L.i, tile: [(tx * T) % S_WIN, (ty * T) % S_WIN, T, T], cheap: 0, px: T * T }); };
+  // terrain shadows are rendered in pieces: one cheap full-layer pass per level, then 256 px tiles at full quality, a pixel budget
+  // per frame. No single GPU submission is ever a whole 2048 px ray-march (that stalled the GPU for seconds).
   const SHADOW_TILE = 256, SHADOW_BUDGET = QS.has('shadowbudget') ? +QS.get('shadowbudget') : 2 * 256 * 256;
   let shadowDirty = true, shadowJobs = [];
   const refreshShadows = () => {
     const s = LIGHT.sunDir; shadowJobs = [];
+    shadowPT.setVector3('sunDir', new V3(s[0], s[1], s[2])); shadowPT.setFloat('pen', P.penumbra);
     if (QS.has('shadowold')) {      // comparison only: every level at full quality in one frame, as before
-      for (const k of LV) { shadowTex[k].setVector3('sunDir', new V3(s[0], s[1], s[2])); shadowTex[k].setFloat('pen', P.penumbra); shadowJobs.push({ k, tile: null, cheap: 0, px: 0 }); }
+      for (const L of GLV) shadowJobs.push({ li: L.i, tile: null, cheap: 0, px: 0 });
       shadowDirty = false; return;
     }
-    for (const k of LV) { shadowTex[k].setVector3('sunDir', new V3(s[0], s[1], s[2])); shadowTex[k].setFloat('pen', P.penumbra); shadowJobs.push({ k, tile: null, cheap: 1, px: (shadowTex[k].size_ * shadowTex[k].size_) / 16 }); }
-    for (const k of LV) { const n = shadowTex[k].size_; for (let y = 0; y < n; y += SHADOW_TILE) for (let x = 0; x < n; x += SHADOW_TILE) shadowJobs.push({ k, tile: [x, y, Math.min(SHADOW_TILE, n - x), Math.min(SHADOW_TILE, n - y)], cheap: 0, px: SHADOW_TILE * SHADOW_TILE }); }
+    for (const L of GLV) shadowJobs.push({ li: L.i, tile: null, cheap: 1, px: S_WIN * S_WIN / 16 });
+    for (const L of GLV) for (let y = 0; y < S_WIN; y += SHADOW_TILE) for (let x = 0; x < S_WIN; x += SHADOW_TILE) shadowJobs.push({ li: L.i, tile: [x, y, SHADOW_TILE, SHADOW_TILE], cheap: 0, px: SHADOW_TILE * SHADOW_TILE });
     shadowDirty = false;
   };
-  // one job per texture per frame (a procedural texture renders once per frame), within the pixel budget
   window.__shadowJobs = () => shadowJobs.length;
+  // tests and review shots: load the terrain tiles around the camera and finish their shadows without rendering frames
+  const terrainSettle = async (ms = 60000) => {
+    const t0 = performance.now();
+    while (TSTREAM && TSTREAM.pending() > 0 && performance.now() - t0 < ms) { const c = scene.activeCamera.position; TSTREAM.update(c.x, c.z); await new Promise((r) => setTimeout(r, 30)); }
+    { const c = scene.activeCamera.position; for (const st of cellStreams) st.tick(c.x, c.z, Infinity); }      // vegetation cells
+    if (shadowDirty) refreshShadows();
+    while (shadowJobs.length && performance.now() - t0 < ms) { shadowStep(); engine._gl.flush(); await new Promise((r) => setTimeout(r, 4)); }
+  };
+  window.__terrainSettle = terrainSettle;
+  window.__GLV = GLV;
+  window.__shadowJob = (li, tile, cheap) => runShadowJob({ li, tile, cheap: cheap || 0 });      // tests: one shadow job, now
   const shadowStep = () => {
-    let used = 0; const busy = new Set();
-    for (let i = 0; i < shadowJobs.length && used < SHADOW_BUDGET; ) {
-      const j = shadowJobs[i];
-      if (busy.has(j.k)) { i++; continue; }
-      const pt = shadowTex[j.k]; pt.tile_ = j.tile; pt.setFloat('cheap', j.cheap); pt.isEnabled = true; pt.resetRefreshCounter();
-      busy.add(j.k); used += j.px; shadowJobs.splice(i, 1);
-    }
+    if (!shadowJobs.length || !shadowPT.isReady()) return;
+    let used = 0;
+    while (shadowJobs.length && used < SHADOW_BUDGET) { const j = shadowJobs.shift(); runShadowJob(j); used += j.px; }
   };
 
   // ---------- terrain mesh: CDLOD ----------
@@ -915,7 +1096,7 @@ void main() {
   // carve the walls: the 2.5 m survey rounds them into domes; on steep rock push the surface in and out sideways
   // into vertical pillars, gullies and blocky offsets (a function of world position, so LODs and morphing agree)
   float dCam = distance(wp, camPos.xz);
-  vec4 nd = textureLod(nArr, vec3(lvUV(MID_I, wp), float(MID_I)), 0.0);     // 16 m slope: big walls only, never small road banks
+  int sl = slopeL(wp); vec4 nd = textureLod(nArr, vec3(lvUV(sl, wp), float(sl)), 0.0);     // 16 m slope: big walls only, never small road banks
   levelSetup(wp); float roadD = detailB(wp).r * 25.5;
   vec2 nxz = nd.rg * 2.0 - 1.0; float slope = 1.0 - sqrt(max(0.0, 1.0 - dot(nxz, nxz)));
   float rockW = ${QS.has('nocarve') ? '0.0 *' : ''} smoothstep(0.36, 0.58, slope) * (1.0 - smoothstep(2500.0, 4500.0, dCam));
@@ -958,10 +1139,10 @@ float tvn(vec2 p) { return texture2D(noiseTex, p * (1.0 / 64.0)).b; }
 uniform highp sampler2DArray texAlb; uniform highp sampler2DArray texNH;
 uniform vec3 layerTint[6]; uniform vec3 layerGain[6]; uniform vec3 layerMean[6]; uniform float layerScale[6]; uniform float layerBump[6];
 float sunShadowC(vec2 xz) {     // terrain shadow with the precomputed level weights, unrolled
-  if (cW0 >= 1.0) return texture2D(s0, lvUV(0, xz)).r;
+  if (cW0 >= 1.0) return shadowL(0, lvUV(0, xz));
   float s; int b;
-  ${LVL.slice(1).map((L) => `${L.i > 1 ? 'else ' : ''}if (${L.i === FAR_I ? 'true' : `cW${L.i} >= 1.0`}) { s = texture2D(s${L.i}, lvUV(${L.i}, xz)).r; b = ${L.i}; }`).join(' ')}
-  ${LVL.slice(0, FAR_I).reverse().map((L) => `if (${L.i} < b && cW${L.i} > 0.0) s = mix(s, texture2D(s${L.i}, lvUV(${L.i}, xz)).r, cW${L.i});`).join('\n  ')}
+  ${GLV.slice(1).map((L) => `${L.i > 1 ? 'else ' : ''}if (${L.i === G_FAR ? 'true' : `cW${L.i} >= 1.0`}) { s = shadowL(${L.i}, lvUV(${L.i}, xz)); b = ${L.i}; }`).join(' ')}
+  ${GLV.slice(0, G_FAR).reverse().map((L) => `if (${L.i} < b && cW${L.i} > 0.0) s = mix(s, shadowL(${L.i}, lvUV(${L.i}, xz)), cW${L.i});`).join('\n  ')}
   return s;
 }
 uniform float waterY; uniform vec4 lakeBox; const bool SHORE_OFF = ${QS.has('noshore')};
@@ -1233,7 +1414,8 @@ void main() {
   const worldMats = [terrainMat];
   const bindLevels = (m) => {
     m.setTexture('hArr', hArr); m.setFloats('lvDf', lvDArr); m.setFloats('lvHf', lvHArr); m.setFloats('patchCf', patchCArr);
-    for (const L of LVL) m.setTexture('s' + L.i, shadowTex[L.name]);
+    m.setFloats('lvWf', lvWArr); m.setVector2('strC', strC); levelMats.push(m);
+    m.setTexture('shArr', shArr);
     m.setTexture('skyLUT', skyLUT);
   };
   bindLevels(terrainMat); bindCar(terrainMat);
@@ -1696,6 +1878,42 @@ void main() {
       q.b.full = true; count++; cost += q.cost;
     }
   }
+  // cell residency (2026-10-19, streamed world phase 2): a cell's GPU buffers (vegetation, full-detail buildings) exist only near the camera (its draw distance
+  // plus a margin): built from the compact placement records as the camera approaches, a few milliseconds per tick, freed when it
+  // leaves. The streams tick every frame within a time budget; terrainSettle() runs them without a limit (shots, tests).
+  const freeCPU = (m) => {      // what releaseGeometry() does, for one mesh built after load
+    if (QS.has('keepgeo')) return;
+    m.getBoundingInfo(); if (m.subMeshes) for (const sm of m.subMeshes) sm.refreshBoundingInfo();
+    const g = m.geometry; if (g) for (const k in g._vertexBuffers) { const b = g._vertexBuffers[k]._buffer; if (b && !b.isUpdatable() && b._data) b._data = null; }
+    const st = m._thinInstanceDataStorage; if (st && st.matrixData && st.matrixBuffer && !st.matrixBuffer.isUpdatable()) { st.matrixData = null; st.matrixBuffer._data = null; }
+  };
+  const cellStreams = [];
+  const cellStream = (name, cells, build, drop, radius) => {
+    // build(c, until) may stop at the time limit and return false: it resumes on the next tick (a town cell takes several)
+    const S = { cells, built: 0, n: 0, maxMs: 0, sumMs: 0 };      // build slices and their times (ms): one slice is one task, a possible hitch
+    S.tick = (px, pz, budgetMs) => {
+      const t0 = performance.now(), R = radius(), want = [];
+      for (const c of cells) {
+        const d = Math.hypot(c.cx - px, c.cz - pz);
+        if (c.on && !c.pin && d > R + 700) { drop(c); c.on = false; S.built--; }
+        else if (!c.on && (d < R + 300 || c.pin)) want.push([c.pin ? -1 : d, c]);
+        else if (!c.on && c.partial && d > R + 700) { if (c.partial.fm) for (const m of c.partial.fm) m.dispose(); c.partial = null; }      // left before it was finished
+      }
+      want.sort((a, b) => a[0] - b[0]);
+      for (const [, c] of want) {
+        if (performance.now() - t0 > budgetMs) break;
+        const tb = performance.now(), done = build(c, t0 + budgetMs) !== false, ms = performance.now() - tb;
+        S.n++; S.sumMs += ms; S.maxMs = Math.max(S.maxMs, ms);
+        if (!done) break;
+        c.on = true; S.built++;
+      }
+      return want.length;
+    };
+    S.name = name; cellStreams.push(S); return S;
+  };
+  // every frame, 3 ms in all (slices that run over end the frame's share): a town cell is ready within about a second
+  scene.onBeforeRenderObservable.add(() => { const p = scene.activeCamera.position, t0 = performance.now(); for (const st of cellStreams) st.tick(p.x, p.z, Math.max(0.5, 3 - (performance.now() - t0))); });
+  const startXZ = (() => { const sp = ROUTE_PTS[QS.has('road') ? Math.min(ROUTE_PTS.length - 1, +QS.get('road')) : 0]; return [sp[0], sp[2]]; })();
   // Full and simple versions swap together in 256 m cells, within ~400 m.
   const BCELL = 256, bcells = new Map();
   const SCELL = 1024, scells = new Map();
@@ -1735,7 +1953,12 @@ void main() {
     const cell = bcell(b), rr0 = Math.abs((b.c[0] * 7.1 + b.c[1] * 3.7) % 1);
     if (b.patch && b.patch !== 'dolomites' && b.cls !== 'castle' && !b.full) { G = scell(b); simpleBuilding(b, o, yaw, L, W, rr0); nSimple++; G = G_MAIN; continue; }
     G = cell.simple; simpleBuilding(b, o, yaw, L, W, rr0);
-    G = cell.full; cell.hasFull = true;
+    cell.hasFull = true; (cell.fulls = cell.fulls || []).push([b, o, yaw, L, W]);
+    if (b.cls === 'malga') malgas.push({ x: b.c[0], z: b.c[1], yaw, L, W });
+  }
+  G = G_MAIN;
+  // the full-detail building, written into the current Geo G: run per 256 m cell when the camera comes near (streamed world phase 2)
+  function fullBuilding(b, o, yaw, L, W) {
     const h1 = (b.c[0] * 7.1 + b.c[1] * 3.7) % 1, rr = Math.abs(h1);
     flowerSeed = 1 + Math.floor(rr * 1e6);
     const lakeStyle = b.patch === 'garda' || b.patch === 'bolzano';
@@ -1787,7 +2010,6 @@ void main() {
       balcony(o, yaw, W - 0.04, L, 1, 3.2, L * 0.85, 1.2, { flowers: true });
       G.roof(o, yaw, 5.8, W, L, W * 0.38, 1.3, C.shingle, C.wood);
       chimney(o, yaw, W * 0.2, L * 0.2, 5.8 + W * 0.38 * 0.6);
-      malgas.push({ x: b.c[0], z: b.c[1], yaw, L, W });
     } else if (b.cls === 'castle') {
       // stone keep or palas: tall rubble walls, small windows, a hipped-looking low roof or crenellations
       // OSM parts: towers (man_made=tower) rise well above the walls, ruins are roofless broken walls, halls are the palas
@@ -1886,7 +2108,6 @@ void main() {
       chimney(o, yaw, -W * 0.18, L * 0.25, wallTop + W * 0.3 * 0.55); if (L > 16) chimney(o, yaw, W * 0.18, -L * 0.3, wallTop + W * 0.3 * 0.55);
     }
   }
-  G = G_MAIN;
   // vineyards (vigneti) near the road: real rows from the OSM vineyard landuse, within ~450 m of the road. On slopes the rows follow
   // the contour; on the valley floor they run straight per field (Trentino pergolas: a canopy on posts, 2.2 m high)
   if (!QS.has('novines')) {
@@ -2101,17 +2322,35 @@ void main() {
   const lifeMesh = (v, name) => { const lm = new BABYLON.Mesh(name, scene); applyGeo(v, lm); lm.material = propMat; lm.renderingGroupId = 1; lm.isPickable = false; lm.freezeWorldMatrix(); return lm; };
   G_MAIN.vds().forEach((v, i) => lifeMesh(v, 'life' + i));
   for (const [k, g] of scells) { lifeCount += g.count(); g.vds().forEach((v, i) => lifeMesh(v, 'bSS' + k + '_' + i)); }
+  // full-detail buildings exist only in cells near the camera (2026-10-19, streamed world phase 2): generated when the camera comes
+  // within ~720 m, swapped in for the simple versions within 420 m, freed beyond ~1.1 km. Before, all ~110 cells stayed on the GPU
+  // (89 MB of vertices) though each is shown only within 420 m.
   const bLod = [];
   for (const [k, c] of bcells) {
-    const sm = c.simple.vds().map((v, i) => lifeMesh(v, 'bS' + k + '_' + i)), fm = c.hasFull ? c.full.vds().map((v, i) => lifeMesh(v, 'bF' + k + '_' + i)) : [];
-    lifeCount += c.simple.count(); if (fm.length) bLod.push({ cx: c.cx, cz: c.cz, sm, fm, near: null });
+    const sm = c.simple.vds().map((v, i) => lifeMesh(v, 'bS' + k + '_' + i));
+    // a cell with a very large building (two big hotels, ~30 ms each to generate) stays built from load: no stutter on approach
+    lifeCount += c.simple.count(); if (c.fulls) bLod.push({ k, cx: c.cx, cz: c.cz, sm, fulls: c.fulls, fm: null, near: null, on: false, pin: c.fulls.some((f) => f[3] * f[4] > 1200) });
   }
-  mark('buildings built'); releaseGeometry(); mark('buildings released');      // the buildings' arrays (~230 MB) go before the scatter is built: keeps the loading peak down
+  const B_NEAR = 420;
+  const bStream = cellStream('buildings', bLod, (c, until) => {
+    if (!c.partial) c.partial = { g: Geo(), i: 0 };
+    const P = c.partial; G = P.g;
+    while (P.i < c.fulls.length) { fullBuilding(...c.fulls[P.i++]); if (performance.now() > until) break; }
+    G = G_MAIN;
+    if (P.i < c.fulls.length) return false;
+    // then the vertex packing, and one mesh (GPU upload) per slice: each is a few ms to tens of ms for a town cell
+    if (!P.vds) { P.vds = P.g.vds(); P.fm = []; return false; }
+    if (P.fm.length < P.vds.length) { const m = lifeMesh(P.vds[P.fm.length], 'bF' + c.k + '_' + P.fm.length); P.vds[P.fm.length] = null; m.setEnabled(false); freeCPU(m); P.fm.push(m); if (P.fm.length < P.vds.length) return false; }
+    c.fm = P.fm; c.near = null; c.partial = null;
+  }, (c) => { for (const m of c.fm) m.dispose(); c.fm = null; c.near = null; c.sm.forEach((m) => m.setEnabled(true)); }, () => B_NEAR);
+  window.__bStream = bStream; window.__cellStreams = () => cellStreams.map((S) => ({ name: S.name, built: S.built, n: S.n, maxMs: +S.maxMs.toFixed(1), meanMs: +(S.sumMs / Math.max(1, S.n)).toFixed(1) }));
+  mark('buildings built'); releaseGeometry(); mark('buildings released');      // the buildings' arrays go before the scatter is built: keeps the loading peak down
+  bStream.tick(startXZ[0], startXZ[1], Infinity); mark('near buildings built');
   let bT = 0;
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now(); if (now - bT < 250) return; bT = now;
     const p = scene.activeCamera.position;
-    for (const c of bLod) { const near = Math.hypot(c.cx - p.x, c.cz - p.z) < 420; if (near === c.near) continue; c.near = near; c.sm.forEach((m) => m.setEnabled(!near)); c.fm.forEach((m) => m.setEnabled(near)); }
+    for (const c of bLod) { const near = !!c.fm && Math.hypot(c.cx - p.x, c.cz - p.z) < B_NEAR; if (near === c.near) continue; c.near = near; c.sm.forEach((m) => m.setEnabled(!near)); if (c.fm) c.fm.forEach((m) => m.setEnabled(near)); }
   });
   console.log('life:', PROPS.buildings.length, 'buildings (', nSimple, 'simple),', malgas.length, 'malgas,', lifeCount, 'triangles');
   window.__malgas = malgas;
@@ -2226,22 +2465,27 @@ void main() {
     const vd = new BABYLON.VertexData(); vd.positions = pos; vd.uvs = uv; vd.indices = idx; return vd;
   })();
   const ASPECT = [0.21, 0.24, 0.3, 0.55, 0.11, 0.5];      // crown half-width / height per kind
-  const treeCells = [];
-  for (const [cx, cz, first, count] of (QS.has('notrees') ? [] : TREES.cells)) {
-    const m = new BABYLON.Mesh('trees_' + cx + '_' + cz, scene); treeVD.applyToMesh(m); m.material = treeMat; m.renderingGroupId = 1; m.isPickable = false;
-    const buf = new Float32Array(count * 16); let ymin = Infinity, ymax = -Infinity;
-    for (let i = 0; i < count; i++) {
-      const o = (first + i) * 6, x = treeRec.getInt16(o, true) / (TREES.pos_scale || 4), z = treeRec.getInt16(o + 2, true) / (TREES.pos_scale || 4), h = treeRec.getUint8(o + 4) / 4, k = treeRec.getUint8(o + 5);
+  const TREE_R = () => ({ low: 1500, medium: 2200, high: 3000, ultra: 4200 }[tierName] || 2500);
+  const treeCells = (QS.has('notrees') ? [] : TREES.cells).map(([x0, z0, first, count]) => ({ x0, z0, first, count, cx: x0 + TREES.cell / 2, cz: z0 + TREES.cell / 2, m: null, on: false }));
+  const treeStream = cellStream('trees', treeCells, (c, until) => {
+    // placements in slices (a dense forest cell has thousands of trees, each a few terrain lookups); the mesh when all are placed
+    if (!c.partial) c.partial = { buf: new Float32Array(c.count * 16), i: 0, ymin: Infinity, ymax: -Infinity };
+    const P = c.partial, buf = P.buf;
+    for (; P.i < c.count; P.i++) {
+      if ((P.i & 63) === 0 && P.i > 0 && performance.now() > until) return false;
+      const i = P.i, o = (c.first + i) * 6, x = treeRec.getInt16(o, true) / (TREES.pos_scale || 4), z = treeRec.getInt16(o + 2, true) / (TREES.pos_scale || 4), h = treeRec.getUint8(o + 4) / 4, k = treeRec.getUint8(o + 5);
       const y = terrainH(x, z) - 0.3, b = i * 16;
-      if (Math.abs(terrainH(x + 2, z) - terrainH(x - 2, z)) + Math.abs(terrainH(x, z + 2) - terrainH(x, z - 2)) > 4.0 || Math.abs(terrainH(x + 8, z) - terrainH(x - 8, z)) + Math.abs(terrainH(x, z + 8) - terrainH(x, z - 8)) > 14) { buf[b + 13] = -1e5; continue; }     // no trees on cliff faces
+      if (Math.abs(terrainH(x + 2, z) - terrainH(x - 2, z)) + Math.abs(terrainH(x, z + 2) - terrainH(x, z - 2)) > 4.0 || Math.abs(terrainH(x + 8, z) - terrainH(x - 8, z)) + Math.abs(terrainH(x, z + 8) - terrainH(x, z - 8)) > 14) { buf[b + 13] = -1e5; continue; }
       buf[b] = h * ASPECT[k]; buf[b + 3] = k; buf[b + 5] = h; buf[b + 10] = 1; buf[b + 12] = x; buf[b + 13] = y; buf[b + 14] = z; buf[b + 15] = 1;
-      ymin = Math.min(ymin, y); ymax = Math.max(ymax, y + h);
+      P.ymin = Math.min(P.ymin, y); P.ymax = Math.max(P.ymax, y + h);
     }
+    const m = new BABYLON.Mesh('trees_' + c.x0 + '_' + c.z0, scene); treeVD.applyToMesh(m); m.material = treeMat; m.renderingGroupId = 1; m.isPickable = false;
     m.thinInstanceSetBuffer('matrix', buf, 16, true);
     m.thinInstanceEnablePicking = false; m.doNotSyncBoundingInfo = true;
-    m.setBoundingInfo(new BABYLON.BoundingInfo(new V3(cx - 10, ymin, cz - 10), new V3(cx + TREES.cell + 10, ymax, cz + TREES.cell + 10)));
-    m.thinInstanceRefreshBoundingInfo = () => {}; treeCells.push({ m, cx: cx + TREES.cell / 2, cz: cz + TREES.cell / 2 }); withA2C(m);
-  }
+    m.setBoundingInfo(new BABYLON.BoundingInfo(new V3(c.x0 - 10, P.ymin, c.z0 - 10), new V3(c.x0 + TREES.cell + 10, P.ymax, c.z0 + TREES.cell + 10)));
+    m.thinInstanceRefreshBoundingInfo = () => {}; withA2C(m); freeCPU(m); c.m = m; c.partial = null;
+  }, (c) => { c.m.dispose(); c.m = null; }, TREE_R);
+  treeStream.tick(startXZ[0], startXZ[1], Infinity);
   // ---------- 3D trees near the camera: tiered skirts of drooping branches (~150 triangles), dithered into the cards ----------
   BABYLON.Effect.ShadersStore.tree3dVertexShader = GL_COMMON + `
 attribute vec3 position; attribute vec3 normal; attribute vec4 color;
@@ -2409,22 +2653,29 @@ void main() {
   // LODs by the distance of the cell centre (256 m cells): 80 triangles near, 20 beyond ~200 m
   const boulderVDs = [boulderVDof(2), boulderVDof(1)], ROCK_LOD = [200];
   const rockCells = [];
-  for (const [cx, cz, first, count] of (QS.has('norocks') ? [] : ROCKS.cells)) {
-    const lods = boulderVDs.map((vd, l) => { const m = new BABYLON.Mesh('rocks_' + cx + '_' + cz + (l ? '_lod' + l : ''), scene); vd.applyToMesh(m); m.material = boulderMat; m.renderingGroupId = 1; m.isPickable = false; return m; });
-    const buf = new Float32Array(count * 16), M = new BABYLON.Matrix(); let ymin = Infinity, ymax = -Infinity;
-    for (let i = 0; i < count; i++) {
-      const o = (first + i) * 6, x = rockRec.getInt16(o, true) / (ROCKS.pos_scale || 4), z = rockRec.getInt16(o + 2, true) / (ROCKS.pos_scale || 4), sz = rockRec.getUint8(o + 4) * ROCKS.size_scale, k = rockRec.getUint8(o + 5);
-      const h1 = Math.sin(x * 12.99 + z * 78.23) * 43758.55, r1 = h1 - Math.floor(h1), r2 = (r1 * 7.31) % 1, r3 = (r1 * 13.7) % 1;
-      const y = terrainH(x, z) - sz * 0.12;
-      BABYLON.Matrix.ComposeToRef(new V3(sz * (0.8 + 0.5 * r2), sz * (0.55 + 0.4 * r3), sz * (0.8 + 0.5 * (1 - r2))),
-        BABYLON.Quaternion.RotationYawPitchRoll(r1 * 6.28, (r2 - 0.5) * 0.35, (r3 - 0.5) * 0.35), new V3(x, y, z), M);
-      M.copyToArray(buf, i * 16); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y + sz);
+  // one cell's LOD meshes, sharing one instance buffer; rocks and shrubs differ only in how a record becomes a matrix
+  const lodCell = (name, vds, mat, info, rec, matrixOf) => (c) => {
+    const lods = vds.map((vd, l) => { const m = new BABYLON.Mesh(name + '_' + c.x0 + '_' + c.z0 + (l ? '_lod' + l : ''), scene); vd.applyToMesh(m); m.material = mat; m.renderingGroupId = 1; m.isPickable = false; m.setEnabled(false); return m; });
+    const buf = new Float32Array(c.count * 16), M = new BABYLON.Matrix(); let ymin = Infinity, ymax = -Infinity;
+    for (let i = 0; i < c.count; i++) {
+      const o = (c.first + i) * 6, x = rec.getInt16(o, true) / (info.pos_scale || 4), z = rec.getInt16(o + 2, true) / (info.pos_scale || 4), sz = rec.getUint8(o + 4) * info.size_scale, k = rec.getUint8(o + 5);
+      const [y, top] = matrixOf(x, z, sz, k, M); M.copyToArray(buf, i * 16); ymin = Math.min(ymin, y); ymax = Math.max(ymax, top);
     }
     for (const m of lods) { m.thinInstanceSetBuffer('matrix', buf, 16, true); m.doNotSyncBoundingInfo = true;
-      m.setBoundingInfo(new BABYLON.BoundingInfo(new V3(cx - 5, ymin, cz - 5), new V3(cx + ROCKS.cell + 5, ymax, cz + ROCKS.cell + 5)));
-      m.thinInstanceRefreshBoundingInfo = () => {}; }
-    rockCells.push({ lods, cut: ROCK_LOD, cx: cx + ROCKS.cell / 2, cz: cz + ROCKS.cell / 2 });
-  }
+      m.setBoundingInfo(new BABYLON.BoundingInfo(new V3(c.x0 - 5, ymin, c.z0 - 5), new V3(c.x0 + info.cell + 5, ymax, c.z0 + info.cell + 5)));
+      m.thinInstanceRefreshBoundingInfo = () => {}; freeCPU(m); }
+    c.lods = lods; c.l = -1;
+  };
+  const dropLods = (c) => { for (const m of c.lods) m.dispose(); c.lods = null; };
+  const rockC = (QS.has('norocks') ? [] : ROCKS.cells).map(([x0, z0, first, count]) => ({ x0, z0, first, count, cx: x0 + ROCKS.cell / 2, cz: z0 + ROCKS.cell / 2, cut: ROCK_LOD, lods: null, on: false }));
+  rockCells.push(...rockC);
+  cellStream('rocks', rockC, lodCell('rocks', boulderVDs, boulderMat, ROCKS, rockRec, (x, z, sz, k, M) => {
+    const h1 = Math.sin(x * 12.99 + z * 78.23) * 43758.55, r1 = h1 - Math.floor(h1), r2 = (r1 * 7.31) % 1, r3 = (r1 * 13.7) % 1;
+    const y = terrainH(x, z) - sz * 0.12;
+    BABYLON.Matrix.ComposeToRef(new V3(sz * (0.8 + 0.5 * r2), sz * (0.55 + 0.4 * r3), sz * (0.8 + 0.5 * (1 - r2))),
+      BABYLON.Quaternion.RotationYawPitchRoll(r1 * 6.28, (r2 - 0.5) * 0.35, (r3 - 0.5) * 0.35), new V3(x, y, z), M);
+    return [y, y + sz];
+  }), dropLods, () => Q.rocksR).tick(startXZ[0], startXZ[1], Infinity);
   // ---------- shrubs: dwarf pine and alpenrose clumps (offline placement), lumpy domes with needle noise, drawn within ~600 m ----------
   const SHRUBS = await getJSON(MAP + 'shrubs.json');
   const shrubRec = new DataView(await getBin(MAP + 'shrubs.bin'));
@@ -2460,42 +2711,34 @@ void main() {
   };
   // LODs by cell-centre distance: 180 triangles near, 80 beyond ~200 m, 20 beyond ~400 m (2 m clumps are a few pixels there)
   const shrubVDs = [shrubVDof(3), shrubVDof(2), shrubVDof(1)], SHRUB_LOD = [200, 400];
-  const shrubCells = [];
-  for (const [cx, cz, first, count] of (QS.has('noshrubs') ? [] : SHRUBS.cells)) {
-    const lods = shrubVDs.map((vd, l) => { const m = new BABYLON.Mesh('shrubs_' + cx + '_' + cz + (l ? '_lod' + l : ''), scene); vd.applyToMesh(m); m.material = shrubMat; m.renderingGroupId = 1; m.isPickable = false; return m; });
-    const buf = new Float32Array(count * 16), M = new BABYLON.Matrix(); let ymin = Infinity, ymax = -Infinity;
-    for (let i = 0; i < count; i++) {
-      const o = (first + i) * 6, x = shrubRec.getInt16(o, true) / (SHRUBS.pos_scale || 4), z = shrubRec.getInt16(o + 2, true) / (SHRUBS.pos_scale || 4), sz = shrubRec.getUint8(o + 4) * SHRUBS.size_scale, k = shrubRec.getUint8(o + 5);
-      const h1 = Math.sin(x * 12.99 + z * 78.23) * 43758.55, r1 = h1 - Math.floor(h1), y = terrainH(x, z) - 0.05;
-      const hs = sz * (k ? 0.45 : 0.7) * (0.8 + 0.4 * r1);
-      BABYLON.Matrix.ComposeToRef(new V3(sz * (1 + 0.6 * r1), hs, sz * (1.6 - 0.6 * r1)), BABYLON.Quaternion.RotationYawPitchRoll(r1 * 6.28, 0, 0), new V3(x, y, z), M);
-      M.copyToArray(buf, i * 16); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y + hs);
-    }
-    for (const m of lods) { m.thinInstanceSetBuffer('matrix', buf, 16, true); m.doNotSyncBoundingInfo = true;
-      m.setBoundingInfo(new BABYLON.BoundingInfo(new V3(cx - 5, ymin, cz - 5), new V3(cx + SHRUBS.cell + 5, ymax, cz + SHRUBS.cell + 5)));
-      m.thinInstanceRefreshBoundingInfo = () => {}; }
-    rockCells.push({ lods, cut: SHRUB_LOD, cx: cx + SHRUBS.cell / 2, cz: cz + SHRUBS.cell / 2, far: true });
-  }
+  const shrubC = (QS.has('noshrubs') ? [] : SHRUBS.cells).map(([x0, z0, first, count]) => ({ x0, z0, first, count, cx: x0 + SHRUBS.cell / 2, cz: z0 + SHRUBS.cell / 2, cut: SHRUB_LOD, far: true, lods: null, on: false }));
+  rockCells.push(...shrubC);
+  cellStream('shrubs', shrubC, lodCell('shrubs', shrubVDs, shrubMat, SHRUBS, shrubRec, (x, z, sz, k, M) => {
+    const h1 = Math.sin(x * 12.99 + z * 78.23) * 43758.55, r1 = h1 - Math.floor(h1), y = terrainH(x, z) - 0.05;
+    const hs = sz * (k ? 0.45 : 0.7) * (0.8 + 0.4 * r1);
+    BABYLON.Matrix.ComposeToRef(new V3(sz * (1 + 0.6 * r1), hs, sz * (1.6 - 0.6 * r1)), BABYLON.Quaternion.RotationYawPitchRoll(r1 * 6.28, 0, 0), new V3(x, y, z), M);
+    return [y, y + hs];
+  }), dropLods, () => Q.rocksR * 1.3).tick(startXZ[0], startXZ[1], Infinity);
   mark('scatter built'); releaseGeometry(); mark('scatter released');      // trees, rocks and shrubs
   let treeT = 0;
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now(); if (now - treeT < 300) return; treeT = now;
-    const p = scene.activeCamera.position, R = { low: 1500, medium: 2200, high: 3000, ultra: 4200 }[tierName] || 2500;
-    for (const c of treeCells) { const on = Math.hypot(c.cx - p.x, c.cz - p.z) < R; if (c.m.isEnabled() !== on) c.m.setEnabled(on); }
+    const p = scene.activeCamera.position, R = TREE_R();
+    for (const c of treeCells) { if (!c.m) continue; const on = Math.hypot(c.cx - p.x, c.cz - p.z) < R; if (c.m.isEnabled() !== on) c.m.setEnabled(on); }
   });
   let rockT = 0; const NO_VEG_LOD = QS.has('novegLod');      // &novegLod: full detail at every distance (A/B timing)
   scene.onBeforeRenderObservable.add(() => {     // only near cells: further out the outcrop texture carries it
     const now = performance.now(); if (now - rockT < 250) return; rockT = now;
     const p = scene.activeCamera.position;
     for (const c of rockCells) {      // one LOD mesh per cell enabled (-1: none)
+      if (!c.lods) continue;
       const d = Math.hypot(c.cx - p.x, c.cz - p.z), l = d < Q.rocksR * (c.far ? 1.3 : 1) ? (NO_VEG_LOD ? 0 : c.cut.filter((x) => d >= x).length) : -1;
       c.lods.forEach((m, k) => { if (m.isEnabled() !== (k === l)) m.setEnabled(k === l); });
     }
   });
   // ---------- grass and flowers around the camera: crossed cards on a jittered grid, 16 m tiles cached, shrinking away at the edge ----------
-  const imgData = async (p) => { const bmp = await createImageBitmap(await (await fetch(assetUrl(p))).blob(), { colorSpaceConversion: 'none' }); const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height; const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0); return cx.getImageData(0, 0, bmp.width, bmp.height).data; };
-  const [maskPx, canPx] = await Promise.all([imgData(MAP + 'near_m.png'), imgData(MAP + 'near_c.png')]);
-  const nearPx = (data, x, z) => { const L = lvl('near'), c = Math.max(0, Math.min(N - 1, Math.floor((x + L.half) / L.res))), r = Math.max(0, Math.min(N - 1, Math.floor((L.half - z) / L.res))); return (r * N + c) * 4; };
+  // the near level's detail flags (bit 3 scree or outcrop, bit 4 forest floor), not its mask images: 32 MB less heap (2026-10-19)
+  const nearF = (x, z) => { const L = lvl('near'), c = Math.max(0, Math.min(N - 1, Math.floor((x + L.half) / L.res))), r = Math.max(0, Math.min(N - 1, Math.floor((L.half - z) / L.res))); return DETAIL_F.near[r * N + c]; };
   const roadGrid = new Map(); for (const r of ROADS) { r.points.forEach((p, i) => { const ex = roadHalf(r, i) - 3.4; const k = Math.floor(p[0] / 16) + ',' + Math.floor(p[2] / 16); if (!roadGrid.has(k)) roadGrid.set(k, []); roadGrid.get(k).push([p[0], p[2], ex]); }); }
   const roadDist = (x, z) => { let d = 1e9; const gx = Math.floor(x / 16), gz = Math.floor(z / 16); for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) { const l = roadGrid.get((gx + i) + ',' + (gz + j)); if (l) for (const p of l) d = Math.min(d, Math.hypot(p[0] - x, p[1] - z) - p[2]); } return d; };
   const grassAtlas = (() => {
@@ -2592,8 +2835,8 @@ void main() {
     for (let j = 0; j < GT / sp; j++) for (let i = 0; i < GT / sp; i++) {
       const h1 = Math.sin((tx * 977 + i) * 12.9898 + (tz * 613 + j) * 78.233) * 43758.5453, r = h1 - Math.floor(h1), r2 = (r * 91.7) % 1, r3 = (r * 37.3) % 1;
       const x = tx * GT + (i + r2) * sp, z = tz * GT + (j + r3) * sp;
-      const k = nearPx(maskPx, x, z); if (maskPx[k] > 90 || maskPx[k + 1] > 170) continue;          // scree, outcrops
-      if (canPx[nearPx(canPx, x, z)] > 12 && r < 0.7) continue;                                    // forest floor: sparse
+      const f = nearF(x, z); if (f & 8) continue;          // scree, outcrops
+      if ((f & 16) && r < 0.7) continue;                  // forest floor: sparse
       const hx = terrainH(x + 1, z) - terrainH(x - 1, z), hz = terrainH(x, z + 1) - terrainH(x, z - 1); if (Math.hypot(hx, hz) / 2 > 0.75) continue;   // steeper than ~37 deg
       if (roadDist(x, z) < half) continue;
       if (inBuilding(x, z)) continue;
@@ -3160,7 +3403,7 @@ vec4 reflectTerrain(vec3 o, vec3 R) {
   // Uniform, bounded march. Carry the first crossing instead of shading in a divergent
   // branch; feather the silhouette by its projected footprint, not a binary hit/miss.
   for (int i = 0; i < REFL_STEPS; i++) {
-    vec3 p = o + R * s; int li = lvW(MID_I, p.xz) >= 1.0 ? MID_I : FAR_I;
+    vec3 p = o + R * s; int li = coarseL(p.xz);
     float d = p.y - hFetchL(li, p.xz);
     float feather = max(3.0, fwidth(d) * 1.5 + s * 0.003);
     float sampleCoverage = 1.0 - smoothstep(-feather, feather, d);
@@ -3172,7 +3415,7 @@ vec4 reflectTerrain(vec3 o, vec3 R) {
     prevD = d; prevS = s; s *= pow(280.0, 1.0 / max(1.0, float(REFL_STEPS - 1)));
   }
   vec3 h = o + R * hitS;
-  int li = lvW(MID_I, h.xz) >= 1.0 ? MID_I : FAR_I;
+  int li = coarseL(h.xz);
   vec2 q = textureLod(nArr, vec3(lvUV(li, h.xz), float(li)), 0.0).rg * 2.0 - 1.0;
   vec3 Nn = normalize(vec3(q.x, sqrt(max(0.02, 1.0 - dot(q, q))), q.y));
   float rock = 1.0 - smoothstep(0.45, 0.62, Nn.y), alt = h.y - waterY;
@@ -3455,6 +3698,7 @@ void main() {
   scene.onBeforeRenderObservable.add(() => {
     const cam = scene.activeCamera;
     updateTerrain(cam);
+    if (TSTREAM) TSTREAM.update(cam.position.x, cam.position.z);
     if (shadowDirty) refreshShadows();
     shadowStep();
     const s = LIGHT.sunDir, A = LIGHT.amb, t = (performance.now() - t0) / 1000;
@@ -3638,6 +3882,7 @@ void main() {
       if (S.lookSun) { const s = LIGHT.sunDir; camera.setTarget(camera.position.add(new V3(s[0], s[1] + 0.03, s[2]))); }
       else camera.setTarget(new V3(S.look[0], S.look[1] + (S.lookGround ? terrainH(S.look[0], S.look[2]) : 0), S.look[2]));
     }
+    for (const st of cellStreams) st.tick(camera.position.x, camera.position.z, Infinity);      // the view's cells at once (a jump, not a drive)
     lastSel = null; return true;
   };
 
@@ -4056,12 +4301,11 @@ void main() {
       show(line + flag);
     }
     show('\n3) terrain shadow pass: one tile per level');
-    for (const k of LV) {
-      const pt = shadowTex[k]; let line = `   shadow ${k.padEnd(15)}`;
+    for (const L of GLV) {
+      const k = L.name, pt = shadowPT; let line = `   shadow ${k.padEnd(15)}`;
       for (const n of SIZES) {
-        pt.setFloat('cheap', 0); pt.tile_ = [0, 0, n, n]; pt.isEnabled = true;
         for (let q = 0; q < 50 && !pt.isReady(); q++) await new Promise((r) => setTimeout(r, 20));
-        const { ms, nd } = await timeGPU(() => pt.render());
+        const { ms, nd } = await timeGPU(() => runShadowJob({ li: L.i, tile: [0, 0, n, n], cheap: 0 }));
         out.draw.push({ m: 'shadow_' + k, n, ms: +ms.toFixed(2), draws: nd }); line += `  ${n}px ${ms.toFixed(1)} ms/${nd}d`;
         if (!nd) { line += '  NO DRAWS (not tested)'; break; }
         if (ms > STEP_BUDGET) { line += '  STOPPED'; break; }
@@ -4103,7 +4347,7 @@ void main() {
   // out their time limits on a material that never becomes ready)
   // Babylon rewrites varying and attribute lines statement by statement, splitting at ';' even inside a trailing // comment: the rest
   // of the comment became code (2026-10-17). Such a line stops the load here with a clear error.
-  for (const [k, src] of Object.entries(BABYLON.Effect.ShadersStore)) if (typeof src === 'string' && /(Vertex|Fragment)Shader$/.test(k) && !/^(default|pbr|standard)/.test(k)) {
+  for (const [k, src] of Object.entries(BABYLON.Effect.ShadersStore)) if (typeof src === 'string' && /(Vertex|Fragment|Pixel)Shader$/.test(k) && !/^(default|pbr|standard)/.test(k)) {
     const bad = src.split('\n').find((l) => /\b(varying|attribute|uniform)\b/.test(l) && /\/\/.*;/.test(l));
     if (bad) { window.__err = (window.__err ? window.__err + ' | ' : '') + 'semicolon in a GLSL comment on a varying/attribute line: ' + k; console.error('GLSL comment with ;', k, bad); } }
   for (const m of scene.materials) if (m.getClassName && m.getClassName() === 'ShaderMaterial') { const prev = m.onError; m.onError = (eff, errs) => { window.__err = (window.__err ? window.__err + ' | ' : '') + m.name + ': ' + String(errs).slice(0, 300); console.error('shader error', m.name, errs); if (prev) prev(eff, errs); }; }
@@ -4167,7 +4411,7 @@ void main() {
     console.log('shader warm-up', Math.round(performance.now() - t0w), 'ms');
     window.__warmupMs = Math.round(performance.now() - t0w);
   }
-  if (QS.has('diag')) { window.__diagHook = { scene, engine, setShot, SHOTS, tier: tierName, readyMs: Math.round(performance.now()) }; await runDiag(); return; }      // the hook lets tools/perf_bench.js time views after the diag
+  if (QS.has('diag')) { window.__diagHook = { scene, engine, setShot, SHOTS, ROUTE_PTS, tier: tierName, readyMs: Math.round(performance.now()) }; await runDiag(); return; }      // the hook lets tools/perf_bench.js time views after the diag
   // ---------- ?diag: one-shot GPU hang diagnosis ----------
   // Every frame is split into small GPU jobs: a barrier (a 1 px clear + readback on a private framebuffer, which waits for all
   // earlier GPU work) at every render-target / procedural-texture / post-process boundary and at every material change in the
@@ -4322,6 +4566,7 @@ void main() {
       for (const name of QS.get('diagshots').split(',')) {
         if (!setShot(name)) { post({ t: now(), ev: 'shot-missing', name }); show('no shot named ' + name); continue; }
         for (let k = 0; k < 5 && !stopped; k++) { frame(); await nextFrame(); }       // streaming, LOD and building cells settle
+        await terrainSettle();      // terrain tiles and their shadows, between frames (split frames are slow)
         if (finishStopped()) return;
         const r = frame();
         if (finishStopped()) return;
@@ -4388,7 +4633,7 @@ void main() {
   });
   const inst = new BABYLON.EngineInstrumentation(engine); inst.captureGPUFrameTime = true;
   const sinst = new BABYLON.SceneInstrumentation(scene); sinst.captureFrameTime = true;
-  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, touchAxis, detailAt, LVL, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
+  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, touchAxis, detailAt, LVL, GLV, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
     setPreset: (p) => { Object.assign(P, PRESETS[p]); updateAtmosphere(); applyLook(); },
     set: (o) => { Object.assign(P, o); updateAtmosphere(); applyLook(); },
     get frames() { return frames; }, get nodes() { return nodeCount; },
