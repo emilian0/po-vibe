@@ -246,7 +246,7 @@ bool inTunnelMouth(vec3 p) {
   { const SM = BABYLON.ShaderMaterial.prototype, ir = SM.isReady;
     SM.isReady = function (...a) { const r = ir.apply(this, a); const L = window.__shaderLog, e = L.find((x) => x[0] === this.name);
       if (!e) L.push([this.name, Math.round(performance.now()), r ? Math.round(performance.now()) : null]); else if (r && e[2] === null) e[2] = Math.round(performance.now()); return r; }; }
-  const MARKS = window.__marks = [], mark = (k) => MARKS.push([k, Math.round(performance.now())]);
+  const MARKS = window.__marks = [], mark = (k) => { MARKS.push([k, Math.round(performance.now())]); CRUMB.set(k, { sec: Math.round(performance.now() / 100) / 10 }); };      // each milestone is also a crash breadcrumb
   const PROF = window.__prof = {}, prof = (k, f) => { const t = performance.now(); try { return f(); } finally { PROF[k] = (PROF[k] || 0) + performance.now() - t; } };
   { const o = scene.onBeforeRenderObservable, add0 = o.add.bind(o); let n = 0;
     o.add = (cb, ...r) => { const at = ((new Error().stack || '').split('\n')[2] || '').replace(/.*dolomites\.js[^:]*:/, 'line ').replace(/:\d+\)?$/, ''); const id = 'cb' + (n++) + ' ' + at; return add0((...a) => prof(id, () => cb(...a)), ...r); }; }
@@ -537,7 +537,7 @@ float carAO(vec3 p) {
     hData = null;
     let nData = new Uint8Array(N * N * 4 * NL);
     for (const L of LVL) nData.set(await imgBytes(MAP + L.name + '_n.png'), L.i * N * N * 4);
-    nArr = mkArr(nData); nData = null;
+    nArr = mkArr(nData); nData = null; mark('normal maps uploaded');
     let aData = new Uint8Array(N * N * 4 * NL), bData = new Uint8Array(N * N * 4 * NL);
     for (const L of LVL) {
       const o = L.i * N * N * 4;
@@ -552,7 +552,7 @@ float carAO(vec3 p) {
         DETAIL_F[L.name] = F;
       }
     }
-    aArr = mkArr(aData); aData = null; bArr = mkArr(bData); bData = null;
+    aArr = mkArr(aData); aData = null; bArr = mkArr(bData); bData = null; mark('detail maps uploaded');
   }
   const lvHArr = LVL.flatMap((L) => [L.offset, L.scale]);
   const lvDArr = LVL.flatMap((L) => [L.cx, L.cz, L.half, L.res]), patchCArr = PATCH_C.flat();
@@ -1946,7 +1946,7 @@ void main() {
     const sm = c.simple.vds().map((v, i) => lifeMesh(v, 'bS' + k + '_' + i)), fm = c.hasFull ? c.full.vds().map((v, i) => lifeMesh(v, 'bF' + k + '_' + i)) : [];
     lifeCount += c.simple.count(); if (fm.length) bLod.push({ cx: c.cx, cz: c.cz, sm, fm, near: null });
   }
-  releaseGeometry();      // the buildings' arrays (~230 MB) go before the scatter is built: keeps the loading peak down
+  mark('buildings built'); releaseGeometry(); mark('buildings released');      // the buildings' arrays (~230 MB) go before the scatter is built: keeps the loading peak down
   let bT = 0;
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now(); if (now - bT < 250) return; bT = now;
@@ -2316,7 +2316,7 @@ void main() {
       m.thinInstanceRefreshBoundingInfo = () => {}; }
     rockCells.push({ lods, cut: SHRUB_LOD, cx: cx + SHRUBS.cell / 2, cz: cz + SHRUBS.cell / 2, far: true });
   }
-  releaseGeometry();      // trees, rocks and shrubs
+  mark('scatter built'); releaseGeometry(); mark('scatter released');      // trees, rocks and shrubs
   let treeT = 0;
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now(); if (now - treeT < 300) return; treeT = now;
@@ -3714,6 +3714,7 @@ void main() {
       pad.querySelector('[data-action="reset"]').addEventListener('click', () => { clear(); resetCar(); });
       sync();
     }
+    mark('controls ready');
     window.addEventListener('blur', () => { for (const key of Object.keys(keys)) keys[key] = false; });
     window.addEventListener('keydown', (e) => {
       keys[e.code] = true;
@@ -3951,7 +3952,9 @@ void main() {
     window.__watchdog = 'stopped';      // ends the test runner's wait (it waits for frames, an error, or a stopped render loop)
   }
   const ready = () => scene.isReady() && lut.isReady();
+  mark('waiting for ready');
   await new Promise((res) => { const chk = () => (ready() ? res() : setTimeout(chk, 100)); chk(); });
+  mark('ready');
   // ---------- shader warm-up ----------
   for (const m of scene.materials) if (m.getClassName && m.getClassName() === 'ShaderMaterial' && m.options.uniforms.includes('fogP') && !m.options.uniforms.includes('cloudT')) m.options.uniforms.push('cloudT');
   // a material whose shader fails to compile ends the load at once with window.__err (else the warm-up and the test runner waited
@@ -3986,13 +3989,13 @@ void main() {
     }
     window.__geoFreedMB = Math.round(freed / 1e6);
   }
-  releaseGeometry();
+  mark('before release'); releaseGeometry(); mark('released');
   if (!QS.has('nowarmup')) {
     const gl = engine._gl, t0w = performance.now();
     const fenceWait = async () => { const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
       while (gl.getSyncParameter(f, gl.SYNC_STATUS) !== gl.SIGNALED) await new Promise((r) => setTimeout(r, 4)); gl.deleteSync(f); };
     const step = (t) => { statusEl.hidden = false; statusEl.textContent = 'Preparing shaders… ' + t; };
-    scene.onBeforeRenderObservable.notifyObservers(scene);      // CPU-side per-frame setup, so the warm-up draws what the first frame will
+    mark('per-frame setup'); scene.onBeforeRenderObservable.notifyObservers(scene); mark('per-frame setup done');      // CPU-side per-frame setup, so the warm-up draws what the first frame will
     const cam = scene.activeCamera;
     const mats = scene.materials.filter((m) => scene.meshes.some((x) => x.material === m && x.getTotalVertices() > 0));
     for (let i = 0; i < mats.length; i++) {
