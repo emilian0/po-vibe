@@ -534,7 +534,41 @@ float carAO(vec3 p) {
     }
     throw new Error('could not decode ' + info + ': ' + ((lastErr && lastErr.message) || lastErr));
   };
+  // our own PNG decoder for the terrain maps (8-bit gray / RGB / RGBA, not interlaced): the browser's zlib (DecompressionStream)
+  // plus the five PNG row filters, straight to RGBA bytes. No createImageBitmap, canvas or bitmap copies (a phone failed to
+  // decode them under memory pressure), and the values are exact (a canvas round trip premultiplies alpha).
+  const pngRGBA = async (p) => {
+    const buf = new Uint8Array(await (await fetch(assetUrl(p))).arrayBuffer()), dv = new DataView(buf.buffer);
+    let o = 8, w = 0, h = 0, ch = 0; const idat = [];
+    while (o < buf.length) {
+      const len = dv.getUint32(o), type = String.fromCharCode(buf[o + 4], buf[o + 5], buf[o + 6], buf[o + 7]);
+      if (type === 'IHDR') { w = dv.getUint32(o + 8); h = dv.getUint32(o + 12); const bd = buf[o + 16], ct = buf[o + 17], il = buf[o + 20];
+        ch = { 0: 1, 2: 3, 6: 4 }[ct]; if (bd !== 8 || !ch || il) throw new Error(p + ': unsupported PNG (bit depth ' + bd + ', colour type ' + ct + ', interlace ' + il + ')'); }
+      else if (type === 'IDAT') idat.push(buf.subarray(o + 8, o + 8 + len));
+      else if (type === 'IEND') break;
+      o += 12 + len;
+    }
+    const raw = new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    const stride = w * ch, out = new Uint8Array(w * h * 4); let prev = new Uint8Array(stride), cur = new Uint8Array(stride);
+    for (let y = 0; y < h; y++) {
+      const f = raw[y * (stride + 1)], src = y * (stride + 1) + 1;
+      for (let i = 0; i < stride; i++) {
+        const x = raw[src + i], a = i >= ch ? cur[i - ch] : 0, b = prev[i], c = i >= ch ? prev[i - ch] : 0;
+        let v;
+        if (f === 0) v = x; else if (f === 1) v = x + a; else if (f === 2) v = x + b; else if (f === 3) v = x + ((a + b) >> 1);
+        else { const pp = a + b - c, pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c); v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c); }
+        cur[i] = v & 255;
+      }
+      const d = y * w * 4;
+      if (ch === 4) out.set(cur, d);
+      else if (ch === 3) for (let x = 0; x < w; x++) { out[d + x * 4] = cur[x * 3]; out[d + x * 4 + 1] = cur[x * 3 + 1]; out[d + x * 4 + 2] = cur[x * 3 + 2]; out[d + x * 4 + 3] = 255; }
+      else for (let x = 0; x < w; x++) { const g = cur[x]; out[d + x * 4] = g; out[d + x * 4 + 1] = g; out[d + x * 4 + 2] = g; out[d + x * 4 + 3] = 255; }
+      const tmp = prev; prev = cur; cur = tmp;
+    }
+    return out;
+  };
   const imgBytes = async (p) => {
+    if (typeof DecompressionStream !== 'undefined' && !QS.has('canvasdecode')) return pngRGBA(p);      // &canvasdecode: the old path, for A/B
     const bmp = await decodeImg(p, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
     const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
     const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
@@ -548,29 +582,43 @@ float carAO(vec3 p) {
   const DETAIL_F = {};
   {
     // no mipmaps: Babylon does not build them for raw 2D arrays, and sampling missing levels returned garbage at distance
-    const mkArr = (d) => { const t = new BABYLON.RawTexture2DArray(d, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, false, false, BABYLON.Texture.BILINEAR_SAMPLINGMODE); t.wrapU = t.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE; return t; };
-    // one staging array at a time (each ~100 MB), dropped right after its upload
-    let hData = new Uint16Array(N * N * NL); LV.forEach((k, i) => hData.set(HT[k], i * N * N));
-    hArr = new BABYLON.RawTexture2DArray(hData, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RED_INTEGER, scene, false, false, BABYLON.Texture.NEAREST_SAMPLINGMODE, BABYLON.Engine.TEXTURETYPE_UNSIGNED_SHORT);
-    hData = null;
-    let nData = new Uint8Array(N * N * 4 * NL);
-    for (const L of LVL) nData.set(await imgBytes(MAP + L.name + '_n.png'), L.i * N * N * 4);
-    nArr = mkArr(nData); nData = null; mark('normal maps uploaded');
-    let aData = new Uint8Array(N * N * 4 * NL), bData = new Uint8Array(N * N * 4 * NL);
+    // texture arrays allocated empty on the GPU and filled one level (layer) at a time, straight from each decoded map: no
+    // 100 MB staging copies (they made the live loading peak, 2026-10-19). Wrapped as Babylon textures like the KTX2 arrays.
+    const gl = engine._gl;
+    const gpuArray = (internal, filter) => {
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, internal, N, N, NL);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache();
+      const it = new BABYLON.InternalTexture(engine, BABYLON.InternalTextureSource.Raw2DArray);
+      it.baseWidth = it.width = N; it.baseHeight = it.height = N; it.baseDepth = it.depth = NL; it.is2DArray = true; it.generateMipMaps = false;
+      it._hardwareTexture = new BABYLON.WebGLHardwareTexture(tex, gl); it.isReady = true;
+      engine.updateTextureSamplingMode(filter, it);
+      const bt = new BABYLON.BaseTexture(scene, it); bt.wrapU = bt.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
+      bt.layer = (i, format, type, data) => { gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, N, N, 1, format, type, data); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache(); };
+      return bt;
+    };
+    // no mipmaps: none were ever built for these arrays (sampling missing levels returned garbage at distance)
+    hArr = gpuArray(gl.R16UI, BABYLON.Texture.NEAREST_SAMPLINGMODE);
+    LV.forEach((k, i) => hArr.layer(i, gl.RED_INTEGER, gl.UNSIGNED_SHORT, HT[k]));
+    nArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE);
+    for (const L of LVL) nArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, await imgBytes(MAP + L.name + '_n.png'));
+    mark('normal maps uploaded');
+    aArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE); bArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE);
     for (const L of LVL) {
-      const o = L.i * N * N * 4;
       if (L.detail) {
         const m = await imgBytes(MAP + L.name + '_m.png'), c = await imgBytes(MAP + L.name + '_c.png'), r = await imgBytes(MAP + L.name + '_r.png'), lu = await imgBytes(MAP + L.name + '_l.png');
+        const aL = new Uint8Array(N * N * 4), bL = new Uint8Array(N * N * 4);
         const F = new Uint8Array(N * N);
         for (let p = 0; p < N * N; p++) { const q = p * 4;
-          aData[o + q] = m[q]; aData[o + q + 1] = m[q + 1]; aData[o + q + 2] = m[q + 2]; aData[o + q + 3] = c[q];
-          bData[o + q] = r[q]; bData[o + q + 1] = lu[q]; bData[o + q + 2] = lu[q + 1]; bData[o + q + 3] = lu[q + 2];
+          aL[q] = m[q]; aL[q + 1] = m[q + 1]; aL[q + 2] = m[q + 2]; aL[q + 3] = c[q];
+          bL[q] = r[q]; bL[q + 1] = lu[q]; bL[q + 2] = lu[q + 1]; bL[q + 3] = lu[q + 2];
           const scree = m[q], outcrop = m[q + 1], canopy = c[q], vine = lu[q], orchard = lu[q + 1], urban = lu[q + 2];
           F[p] = (canopy < 8 && scree < 90 && outcrop < 170 && urban < 60 && vine < 60 && orchard < 60 ? 1 : 0) | (vine >= 140 ? 2 : 0) | (orchard >= 140 ? 4 : 0); }
         DETAIL_F[L.name] = F;
-      }
+        aArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, aL); bArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, bL);
+      }      // levels without detail maps (far) keep an empty layer: the shader never reads it
     }
-    aArr = mkArr(aData); aData = null; bArr = mkArr(bData); bData = null; mark('detail maps uploaded');
+    mark('detail maps uploaded');
   }
   const lvHArr = LVL.flatMap((L) => [L.offset, L.scale]);
   const lvDArr = LVL.flatMap((L) => [L.cx, L.cz, L.half, L.res]), patchCArr = PATCH_C.flat();
@@ -590,12 +638,62 @@ float carAO(vec3 p) {
     const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0);
     const d = new Uint8Array(cx.getImageData(0, 0, w, h).data.buffer); if (bmp.close) bmp.close(); cv.width = cv.height = 0; return d;
   };
+  // KTX2 (UASTC level 4, no RDO, linear, mipmapped; tools/terrain/make_ktx2.sh) transcoded on the device to ASTC 4x4 (phones),
+  // BC7 (desktops), ETC2, or uncompressed RGBA as a last resort: a quarter of the GPU memory of the RGBA arrays, and no canvas
+  // decode while loading (2026-10-19). Used for the terrain and the props photo arrays; any failure falls back to the JPG strips.
+  // &noktx: the JPG strips, for A/B.
+  const ktx2Array = async (path) => {
+    if (!window.BASIS) await new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'lib/basis/basis_transcoder.js'; s.onload = res; s.onerror = () => rej(new Error('basis transcoder script')); document.head.appendChild(s); });
+    const M = window.__basisM || (window.__basisM = await window.BASIS({ locateFile: (f) => 'lib/basis/' + f }));
+    M.initializeBasis();
+    const gl = engine._gl, caps = engine.getCaps();
+    const TF = M.transcoder_texture_format, ext = (n) => gl.getExtension(n);
+    let fmt, glFmt, name;
+    if (caps.astc && ext('WEBGL_compressed_texture_astc')) { fmt = TF.cTFASTC_4x4_RGBA.value; glFmt = ext('WEBGL_compressed_texture_astc').COMPRESSED_RGBA_ASTC_4x4_KHR; name = 'ASTC 4x4'; }
+    else if (caps.bptc && ext('EXT_texture_compression_bptc')) { fmt = TF.cTFBC7_RGBA.value; glFmt = ext('EXT_texture_compression_bptc').COMPRESSED_RGBA_BPTC_UNORM_EXT; name = 'BC7'; }
+    else if (ext('WEBGL_compressed_texture_etc')) { fmt = TF.cTFETC2_RGBA.value; glFmt = ext('WEBGL_compressed_texture_etc').COMPRESSED_RGBA8_ETC2_EAC; name = 'ETC2'; }
+    else { fmt = TF.cTFRGBA32.value; glFmt = gl.RGBA8; name = 'RGBA'; }
+    if (QS.get('ktxfmt') === 'rgba') { fmt = TF.cTFRGBA32.value; glFmt = gl.RGBA8; name = 'RGBA'; }      // test: same data, uncompressed
+    const k = new M.KTX2File(new Uint8Array(await (await fetch(assetUrl(path))).arrayBuffer()));
+    try {
+      if (!k.isValid()) throw new Error('invalid KTX2 ' + path);
+      const w = k.getWidth(), h = k.getHeight(), layers = Math.max(1, k.getLayers()), levels = k.getLevels();
+      if (!k.startTranscoding()) throw new Error('startTranscoding ' + path);
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, levels, glFmt, w, h, layers);
+      for (let lv = 0; lv < levels; lv++) {
+        const lw = Math.max(1, w >> lv), lh = Math.max(1, h >> lv);
+        for (let ly = 0; ly < layers; ly++) {
+          const dst = new Uint8Array(k.getImageTranscodedSizeInBytes(lv, ly, 0, fmt));
+          if (!k.transcodeImage(dst, lv, ly, 0, fmt, 0, -1, -1)) throw new Error('transcode ' + path + ' ' + lv + '/' + ly);
+          if (name === 'RGBA') gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, lv, 0, 0, ly, lw, lh, 1, gl.RGBA, gl.UNSIGNED_BYTE, dst);
+          else gl.compressedTexSubImage3D(gl.TEXTURE_2D_ARRAY, lv, 0, 0, ly, lw, lh, 1, glFmt, dst);
+        }
+      }
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache();
+      const it = new BABYLON.InternalTexture(engine, BABYLON.InternalTextureSource.Raw2DArray);
+      it.baseWidth = it.width = w; it.baseHeight = it.height = h; it.baseDepth = it.depth = layers; it.is2DArray = true;
+      it.generateMipMaps = levels > 1; it.type = BABYLON.Constants.TEXTURETYPE_UNSIGNED_BYTE; it.format = BABYLON.Constants.TEXTUREFORMAT_RGBA;
+      it._hardwareTexture = new BABYLON.WebGLHardwareTexture(tex, gl); it.isReady = true;
+      engine.updateTextureSamplingMode(BABYLON.Texture.TRILINEAR_SAMPLINGMODE, it);
+      const bt = new BABYLON.BaseTexture(scene, it); bt.name = path;
+      window.__ktx = Object.assign(window.__ktx || {}, { [path]: name + ' ' + w + 'x' + h + 'x' + layers + ' mips ' + levels });
+      return bt;
+    } finally { k.close(); k.delete(); }
+  };
+  // a photo array: KTX2 when it loads, else the JPG strip (S x S x NL RGBA, GPU-built mipmaps)
+  const photoArray = async (base, S, NL) => {
+    let t = null;
+    if (!QS.has('noktx')) { try { t = await ktx2Array(base + '.ktx2'); } catch (e) { console.warn('KTX2 failed, using the JPG strip:', e); (window.__ktxErr = window.__ktxErr || []).push(base + ': ' + ((e && e.message) || e)); CRUMB.set('ktx2 failed: ' + ((e && e.message) || e)); } }
+    if (!t) t = new BABYLON.RawTexture2DArray(await loadStrip(base + '.jpg'), S, S, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE);
+    t.wrapU = t.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE; return t;
+  };
   const texArr = {};
   {
     const S = TEX_INFO.size, NL = TEX_INFO.layers.length;
-    for (const [k, src] of [['alb', 'textures/terrain/albedo.jpg'], ['nh', 'textures/terrain/nh.jpg']]) {      // one after the other (100 MB each)
-      const t = new BABYLON.RawTexture2DArray(await loadStrip(src), S, S, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE);
-      t.wrapU = t.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE; t.anisotropicFilteringLevel = Q.photoAniso; texArr[k] = t;      // 8x cost 10-15 % of the GPU frame for no visible difference over 4x (tools/gpu_profile.js, 2026-10-16)
+    for (const [k, base] of [['alb', 'textures/terrain/albedo'], ['nh', 'textures/terrain/nh']]) {      // one after the other
+      const t = await photoArray(base, S, NL);
+      t.anisotropicFilteringLevel = Q.photoAniso; texArr[k] = t;      // 8x cost 10-15 % of the GPU frame for no visible difference over 4x (tools/gpu_profile.js, 2026-10-16)
     }
   }
 
@@ -1327,8 +1425,8 @@ void main() {
   });
   {
     const info = await getJSON('textures/props/props_layers.json'), S = info.size, NL = info.layers.length;
-    const [a, b] = await Promise.all([loadStrip('textures/props/albedo.jpg'), loadStrip('textures/props/nh.jpg')]);
-    for (const [k, d] of [['propAlb', a], ['propNH', b]]) { const t = new BABYLON.RawTexture2DArray(d, S, S, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE); t.wrapU = t.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE; t.anisotropicFilteringLevel = 8; propMat.setTexture(k, t); }
+    for (const [k, base] of [['propAlb', 'textures/props/albedo'], ['propNH', 'textures/props/nh']]) { const t = await photoArray(base, S, NL); t.anisotropicFilteringLevel = 8; propMat.setTexture(k, t); }      // one after the other
+    window.__basisM = null;      // the last KTX2 texture: drop the transcoder and its 36 MB of WebAssembly memory
     propMat.setArray3('propMean', info.layers.map((l) => info.linear_mean_albedo[l]).flat());
     propMat.setFloats('propScale', [2.4, 2.0, 3.0, 2.6, 1.6, 1.6]);
   }
