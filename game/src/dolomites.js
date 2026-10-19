@@ -205,7 +205,7 @@ bool inTunnelMouth(vec3 p) {
   // ---------- quality tier: a short GPU benchmark at load picks it (?quality=low|medium|high|ultra overrides); resolution then adapts ----------
   const DPR = Math.min(window.devicePixelRatio || 1, 2);
   const TIERS = {
-    low:    { scale: [0.6, 1.0, 0.75], msaa: 1, lodR: 170, rockB: 1, tfade: [900, 1800],  shadowNear: 1024, grassR: 0,  treeIn: 0,   treeOut: 0,   rocksR: 300, probe: 64,  probeRate: 4, glass: 0,   carMask: 256, photoAniso: 2 },
+    low:    { scale: [0.6, DPR, 1.0], msaa: 1, lodR: 170, rockB: 1, tfade: [900, 1800],  shadowNear: 1024, grassR: 0,  treeIn: 0,   treeOut: 0,   rocksR: 300, probe: 64,  probeRate: 4, glass: 128,   carMask: 256, photoAniso: 2 },
     medium: { scale: [0.75, 1.25, 1.0], msaa: 4, lodR: 240, rockB: 2, tfade: [1400, 3000], shadowNear: 2048, grassR: 22, treeIn: 75,  treeOut: 100, rocksR: 450, probe: 128, probeRate: 3, glass: 256, carMask: 512, photoAniso: 4 },
     high:   { scale: [1.0, DPR, Math.min(DPR, 1.5)], msaa: 4, lodR: 320, rockB: 2, tfade: [1800, 4000], shadowNear: 2048, grassR: 32, treeIn: 105, treeOut: 135, rocksR: 650, probe: 128, probeRate: 2, glass: 512, carMask: 512, photoAniso: 4 },
     ultra:  { scale: [1.0, DPR, DPR], msaa: 4, lodR: 450, rockB: 3, tfade: [2500, 6000], shadowNear: 4096, grassR: 44, treeIn: 150, treeOut: 190, rocksR: 900, probe: 256, probeRate: 1, glass: 512, carMask: 1024, photoAniso: 4 },
@@ -4343,7 +4343,9 @@ void main() {
   window.addEventListener('resize', () => engine.resize());
   let frames = 0; scene.onAfterRenderObservable.add(() => frames++);
   // dynamic resolution: hold ~35 fps (GPU time when the browser reports it, frame time otherwise) between the tier's limits
-  const TARGET_MS = +(QS.get('targetms') || 28);
+  // phones (2026-10-19): the low tier rendered at 1 px per CSS px (a third of an iPhone's resolution) while holding 60 fps. Without a
+  // GPU timer (iOS) the frame time is capped by vsync, so a steady ~16.7 ms frame counts as headroom; target ~45 fps on phones
+  const TARGET_MS = +(QS.get('targetms') || (isMobile ? 22 : 28));
   let dynT = performance.now(), dynFrames = 0, dynHold = 0;
   scene.onAfterRenderObservable.add(() => {
     dynFrames++;
@@ -4352,7 +4354,7 @@ void main() {
     const ms = gpu > 0.1 ? gpu : frameMs;
     let next = renderScale;
     if (ms > TARGET_MS * 1.08) next = Math.max(Q.scale[0], renderScale * Math.sqrt(TARGET_MS / ms));
-    else if (ms < TARGET_MS * 0.7 && ++dynHold > 1) { next = Math.min(Q.scale[1], renderScale + 0.1); dynHold = 0; }
+    else if ((ms < TARGET_MS * 0.7 || (gpu <= 0.1 && ms < 17.8)) && ++dynHold > 1) { next = Math.min(Q.scale[1], renderScale * 1.15); dynHold = 0; }
     if (Math.abs(next - renderScale) > 0.04) { renderScale = Math.round(next * 20) / 20; engine.setHardwareScalingLevel(1 / renderScale); }
   });
   const inst = new BABYLON.EngineInstrumentation(engine); inst.captureGPUFrameTime = true;
