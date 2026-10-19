@@ -66,7 +66,8 @@
 .stick-zone.active .knob { background: #e8bb52; }
 .stick-label { position: absolute; bottom: max(10px, env(safe-area-inset-bottom)); left: 0; right: 0; text-align: center;
   font-size: 11px; font-weight: 700; letter-spacing: .08em; color: rgba(255,255,255,.7); text-shadow: 0 1px 3px rgba(0,0,0,.6); pointer-events: none; }
-#driveTouch .touch-hand { position: absolute; z-index: 1; top: calc(22% + 8px); right: max(18px, env(safe-area-inset-right)); width: 150px; height: 48px; font-size: 12px; }
+#fpsChip { position: fixed; z-index: 13; right: max(10px, env(safe-area-inset-right)); top: max(10px, env(safe-area-inset-top)); pointer-events: none;
+  padding: 4px 8px; border-radius: 8px; background: rgba(20, 26, 22, 0.45); color: #f4f6f2; font: 600 13px/1 inherit; font-family: inherit; font-variant-numeric: tabular-nums; }
 .touch-actions { position: absolute; left: max(12px, env(safe-area-inset-left)); top: max(10px, env(safe-area-inset-top)); display: flex; gap: 8px; }
 .touch-actions button { padding: 10px 12px; }
 .corridor-touch .mode { top: max(12px, env(safe-area-inset-top)); padding: 12px; font-size: 18px; }
@@ -74,7 +75,6 @@
 .corridor-touch .tools button { min-height: 48px; padding: 8px 10px; }
 .corridor-touch .hint, .corridor-touch .help, .corridor-touch .joy { display: none !important; }
 @media (max-width: 500px) {
-  #driveTouch .touch-hand { width: 120px; }
-  .stick-zone { top: 30%; } #driveTouch .touch-hand { top: calc(30% + 8px); }      /* portrait: below the taller top bar */
+  .stick-zone { top: 30%; }      /* portrait: below the taller top bar */
   .corridor-touch .mode { top: calc(70px + env(safe-area-inset-top)); }
 }

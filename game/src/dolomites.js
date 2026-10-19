@@ -78,7 +78,8 @@
   statusEl.textContent = 'Loading the Dolomites…';
   document.querySelector('.hud') && (document.querySelector('.hud').style.display = 'none');
   if (QS.has('shot')) { const st = document.createElement('style'); st.textContent = '.tools,.mode,.help,.joy,.hint,#lookPanel{display:none!important}'; document.head.appendChild(st); }
-  for (const id of ['hornBtn', 'timeBtn', 'lightBtn', 'resetBtn', 'carSel']) { const e = $(id); if (e) e.style.display = 'none'; }
+  // phones (2026-10-19, the user): no Look, Sound or Perf toggles, just an fps counter in a corner (below)
+  for (const id of ['hornBtn', 'timeBtn', 'lightBtn', 'resetBtn', 'carSel', ...(isMobile ? ['soundBtn', 'perfBtn'] : [])]) { const e = $(id); if (e) e.style.display = 'none'; }
 
   // ---------- data ----------
   const getJSON = async (p) => { const r = await fetch(assetUrl(p)); if (!r.ok) throw new Error('could not load assets/' + p + ' (' + r.status + ')'); return r.json(); };
@@ -230,10 +231,10 @@ bool inTunnelMouth(vec3 p) {
   // ---------- quality tier: a short GPU benchmark at load picks it (?quality=low|medium|high|ultra overrides); resolution then adapts ----------
   const DPR = Math.min(window.devicePixelRatio || 1, 2);
   const TIERS = {
-    low:    { scale: [0.6, DPR, 1.0], msaa: 1, lodR: 170, rockB: 1, tfade: [900, 1800],  shadowNear: 1024, grassR: 0,  treeIn: 0,   treeOut: 0,   rocksR: 300, probe: 64,  probeRate: 4, glass: 256,   carMask: 256, photoAniso: 2 },
-    medium: { scale: [0.75, 1.25, 1.0], msaa: 4, lodR: 240, rockB: 2, tfade: [1400, 3000], shadowNear: 2048, grassR: 22, treeIn: 75,  treeOut: 100, rocksR: 450, probe: 128, probeRate: 3, glass: 256, carMask: 512, photoAniso: 4 },
-    high:   { scale: [1.0, DPR, Math.min(DPR, 1.5)], msaa: 4, lodR: 320, rockB: 2, tfade: [1800, 4000], shadowNear: 2048, grassR: 32, treeIn: 105, treeOut: 135, rocksR: 650, probe: 128, probeRate: 2, glass: 512, carMask: 512, photoAniso: 4 },
-    ultra:  { scale: [1.0, DPR, DPR], msaa: 4, lodR: 450, rockB: 3, tfade: [2500, 6000], shadowNear: 4096, grassR: 44, treeIn: 150, treeOut: 190, rocksR: 900, probe: 256, probeRate: 1, glass: 512, carMask: 1024, photoAniso: 4 },
+    low:    { scale: [0.6, DPR, 1.0], msaa: 1, lodR: 170, rockB: 1, tfade: [900, 1800],  shadowNear: 1024, grassR: 0,  treeIn: 0,   treeOut: 0,   rocksR: 300, probe: 64,  probeRate: 4, glass: 1024,   carMask: 256, photoAniso: 2 },
+    medium: { scale: [0.75, 1.25, 1.0], msaa: 4, lodR: 240, rockB: 2, tfade: [1400, 3000], shadowNear: 2048, grassR: 22, treeIn: 75,  treeOut: 100, rocksR: 450, probe: 128, probeRate: 3, glass: 1024, carMask: 512, photoAniso: 4 },
+    high:   { scale: [1.0, DPR, Math.min(DPR, 1.5)], msaa: 4, lodR: 320, rockB: 2, tfade: [1800, 4000], shadowNear: 2048, grassR: 32, treeIn: 105, treeOut: 135, rocksR: 650, probe: 128, probeRate: 2, glass: 1024, carMask: 512, photoAniso: 4 },
+    ultra:  { scale: [1.0, DPR, DPR], msaa: 4, lodR: 450, rockB: 3, tfade: [2500, 6000], shadowNear: 4096, grassR: 44, treeIn: 150, treeOut: 190, rocksR: 900, probe: 256, probeRate: 1, glass: 1024, carMask: 1024, photoAniso: 4 },
   };
   const benchGPU = () => {      // full-screen ALU + texture work into a 1024² target, timed to completion; ~3 ms on an AMD Radeon Pro 5500M
     try {
@@ -264,7 +265,7 @@ bool inTunnelMouth(vec3 p) {
   for (const [k, v] of QS) if (k.startsWith('q.') && k.slice(2) in Q && !Array.isArray(Q[k.slice(2)])) Q[k.slice(2)] = +v;      // test overrides, e.g. &q.msaa=1
   const SAFE = { on: false };     // set by the frame watchdog: drops the expensive passes after very long frames
   console.log('GPU benchmark', benchMs.toFixed(2), 'ms ->', tierName);
-  let renderScale = +(QS.get('scale') || Q.scale[2]);
+  let renderScale = +(QS.get('scale') || Q.scale[2]), pendingScale = 0;
   CRUMB.ctx.tier = tierName;
   engine.setHardwareScalingLevel(1 / renderScale);
   const scene = new BABYLON.Scene(engine, { useFloatingOrigin: !QS.has('nofloat') });     // camera-relative rendering: no precision loss 10 km from the origin
@@ -3688,7 +3689,8 @@ void main() {
       }
       // the parked car is scenery here: no refraction pass (it re-renders the whole terrain) and merged parts (~900 draws -> a few dozen)
       // glass keeps real refraction, but what it refracts is cheap: the car itself, the road, the sky and the coarse terrain stand-in
-      // (the full terrain in that pass cost ~14 ms); 512 px, every frame
+      // (the full terrain in that pass cost ~14 ms); every frame. 1024 px on every tier (2026-10-19): the target spans the whole screen,
+      // so 256-512 px showed stair steps in the windows on a phone's ~1700 px wide canvas
       {
         const th = scene._transmissionHelper;
         if (th && th._opaqueRenderTarget && !QS.has('noglass') && Q.glass) {
@@ -3810,11 +3812,11 @@ void main() {
       document.body.classList.add('corridor-touch');
       const pad = document.createElement('div'); pad.id = 'driveTouch';
       // two floating sticks (2026-10-19, the user's choice): the left half steers (sideways), the right half is gas (up) and
-      // brake / reverse (down). Each stick appears under the thumb; values are analog. Handbrake, camera and reset stay buttons.
+      // brake / reverse (down). Each stick appears under the thumb; values are analog. Camera and reset stay buttons (the handbrake
+      // button was removed at the user's request, 2026-10-19; Space still works on a keyboard).
       pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button></div>' +
         '<div class="stick-zone" data-stick="steer" aria-label="Steering stick: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
-        '<div class="stick-zone" data-stick="pedal" aria-label="Pedal stick: drag up for gas, down to brake and reverse"><div class="stick"><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>' +
-        '<button type="button" class="touch-hand" data-key="Space" aria-label="Handbrake">HANDBRAKE</button>';
+        '<div class="stick-zone" data-stick="pedal" aria-label="Pedal stick: drag up for gas, down to brake and reverse"><div class="stick"><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>';
       document.body.appendChild(pad);
       const R = 58, DEAD = 0.08;
       const sticks = {};
@@ -3844,34 +3846,13 @@ void main() {
         zone.addEventListener('contextmenu', (e) => e.preventDefault());
         S.reset();
       }
-      const held = new Map();
-      const sync = () => {
-        for (const button of pad.querySelectorAll('[data-key]')) {
-          const on = Array.from(held.values()).includes(button);
-          touchKeys[button.dataset.key] = on;
-          button.classList.toggle('pressed', on); button.setAttribute('aria-pressed', String(on));
-        }
-      };
-      const release = e => { held.delete(e.pointerId); sync(); };
-      for (const button of pad.querySelectorAll('[data-key]')) {
-        button.addEventListener('pointerdown', e => {
-          if (e.pointerType === 'mouse' && e.button !== 0) return;
-          e.preventDefault(); e.stopPropagation(); held.set(e.pointerId, button); sync();
-          try { button.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
-        });
-        button.addEventListener('lostpointercapture', release);
-        button.addEventListener('contextmenu', e => e.preventDefault());
-      }
-      window.addEventListener('pointerup', release);
-      window.addEventListener('pointercancel', release);
-      const clear = () => { held.clear(); sync(); for (const S of Object.values(sticks)) S.reset(); };
+      const clear = () => { for (const S of Object.values(sticks)) S.reset(); };
       window.addEventListener('blur', clear);
       window.addEventListener('pagehide', clear);
       window.addEventListener('resize', clear);
       document.addEventListener('visibilitychange', () => { if (document.hidden) clear(); });
       pad.querySelector('[data-action="camera"]').addEventListener('click', cycleCamera);
       pad.querySelector('[data-action="reset"]').addEventListener('click', () => { clear(); resetCar(); });
-      sync();
     }
     mark('controls ready');
     window.addEventListener('blur', () => { for (const key of Object.keys(keys)) keys[key] = false; });
@@ -3996,16 +3977,18 @@ void main() {
   // the panel opens right under the toolbar, toggled by its own Look button (and by G), so it never covers the buttons
   const tools = document.querySelector('.tools');
   const lookBtn = document.createElement('button'); lookBtn.type = 'button'; lookBtn.id = 'lookBtn'; lookBtn.textContent = 'Look';
-  if (tools) tools.appendChild(lookBtn);
+  if (tools && !isMobile) tools.appendChild(lookBtn);
   const placePanel = () => { if (tools) { const r = tools.getBoundingClientRect(); panel.style.top = Math.round(r.bottom + 8) + 'px'; panel.style.right = Math.max(16, Math.round(innerWidth - r.right)) + 'px'; } };
   const setPanel = (on) => { panel.style.display = on ? '' : 'none'; lookBtn.setAttribute('aria-pressed', on ? 'true' : 'false'); if (on) placePanel(); };
-  setPanel(panel.style.display !== 'none');
+  setPanel(!isMobile && panel.style.display !== 'none');
   lookBtn.addEventListener('click', () => setPanel(panel.style.display === 'none'));
   window.addEventListener('resize', placePanel);
   window.addEventListener('keydown', (e) => { if (e.key === 'g' || e.key === 'G') setPanel(panel.style.display === 'none'); });
-  // frame rate line: fps and frame time over the last half second
+  // frame rate line: fps and frame time over the last half second (phones: a small counter in the top-right corner)
+  const fpsChip = isMobile && !QS.has('shot') ? document.body.appendChild(Object.assign(document.createElement('div'), { id: 'fpsChip', textContent: '– fps' })) : null;
   { let n = 0, t0 = performance.now(); scene.onAfterRenderObservable.add(() => { n++; const t = performance.now(); if (t - t0 < 500) return;
       const el = document.getElementById('fpsLine'); if (el) { const fps = n * 1000 / (t - t0); el.innerHTML = `<b>${fps.toFixed(0)} fps</b> · ${(1000 / fps).toFixed(1)} ms/frame · render scale ${(1 / engine.getHardwareScalingLevel()).toFixed(2)}`; }
+      if (fpsChip) fpsChip.textContent = Math.round(n * 1000 / (t - t0)) + ' fps';
       n = 0; t0 = t; }); }
 
   updateAtmosphere(); applyLook();
@@ -4376,6 +4359,7 @@ void main() {
     // errors inside Babylon reach window.onerror as a bare "Script error." (the CDN script is cross-origin): catch them here,
     // show the message and where it came from, and stop rather than repeat it every frame
     { const nf0 = (window.__frameLog || []).length + 1; if (nf0 <= 5) CRUMB.set('frame ' + nf0 + ' starting'); }
+    if (pendingScale) { renderScale = pendingScale; pendingScale = 0; engine.setHardwareScalingLevel(1 / renderScale); }
     try { scene.render(); } catch (e) {
       engine.stopRenderLoop(); const at = String((e && e.stack) || '').split('\n').slice(0, 4).map((l) => l.trim().replace(/https?:\/\/[^/]+\//, '')).join(' | ');
       fail('Something went wrong while rendering: ' + ((e && e.message) || e) + ' [' + at + ']'); console.error(e); return; }
@@ -4389,16 +4373,18 @@ void main() {
   // phones (2026-10-19): the low tier rendered at 1 px per CSS px (a third of an iPhone's resolution) while holding 60 fps. Without a
   // GPU timer (iOS) the frame time is capped by vsync, so a steady ~16.7 ms frame counts as headroom; target ~45 fps on phones
   const TARGET_MS = +(QS.get('targetms') || (isMobile ? 22 : 28));
-  let dynT = performance.now(), dynFrames = 0, dynHold = 0;
+  // a resize mid-loop showed one frame of the page background (a light-blue flash on the phone), so changes wait for the start of
+  // the next frame; and a level that proved too slow becomes the ceiling, so the resolution settles instead of swinging every few seconds
+  let dynT = performance.now(), dynFrames = 0, dynHold = 0, dynCeil = Q.scale[1], lastUp = 0;
   scene.onAfterRenderObservable.add(() => {
     dynFrames++;
     const now = performance.now(); if (now - dynT < 1500 || QS.has('shot') || QS.has('scale')) return;
     const gpu = inst.gpuFrameTimeCounter.lastSecAverage / 1e6, frameMs = (now - dynT) / dynFrames; dynT = now; dynFrames = 0;
     const ms = gpu > 0.1 ? gpu : frameMs;
     let next = renderScale;
-    if (ms > TARGET_MS * 1.08) next = Math.max(Q.scale[0], renderScale * Math.sqrt(TARGET_MS / ms));
-    else if ((ms < TARGET_MS * 0.7 || (gpu <= 0.1 && ms < 17.8)) && ++dynHold > 1) { next = Math.min(Q.scale[1], renderScale * 1.15); dynHold = 0; }
-    if (Math.abs(next - renderScale) > 0.04) { renderScale = Math.round(next * 20) / 20; engine.setHardwareScalingLevel(1 / renderScale); }
+    if (ms > TARGET_MS * 1.08) { next = Math.max(Q.scale[0], renderScale * Math.sqrt(TARGET_MS / ms)); if (now - lastUp < 8000) dynCeil = Math.max(Q.scale[0], renderScale - 0.05); dynHold = 0; }
+    else if ((ms < TARGET_MS * 0.7 || (gpu <= 0.1 && ms < 17.8)) && ++dynHold > 3) { next = Math.min(dynCeil, renderScale * 1.15); dynHold = 0; if (next > renderScale) lastUp = now; }
+    if (Math.abs(next - renderScale) > 0.04) pendingScale = Math.round(next * 20) / 20;
   });
   const inst = new BABYLON.EngineInstrumentation(engine); inst.captureGPUFrameTime = true;
   const sinst = new BABYLON.SceneInstrumentation(scene); sinst.captureFrameTime = true;
