@@ -30,6 +30,22 @@
   window.addEventListener('error', (e) => fail('Something went wrong: ' + (e.message || 'unknown error')));
   window.addEventListener('unhandledrejection', (e) => fail('Something went wrong while loading: ' + ((e.reason && e.reason.message) || e.reason || 'unknown error')));
   const QS = new URLSearchParams(location.search);
+  // crash breadcrumb (2026-10-19): phones kill the tab without a message. Every loading step and the first frames are written to
+  // localStorage, which survives the crash; the next load shows where the last one stopped. Cleared after 300 good frames.
+  const CRUMB = { set: (s, extra) => { try { localStorage.setItem('poCrumb', JSON.stringify(Object.assign({ s, t: new Date().toISOString().slice(11, 19) }, CRUMB.ctx, extra || {}))); } catch (_) {} }, ctx: {} };
+  try {
+    const prev = JSON.parse(localStorage.getItem('poCrumb') || 'null');
+    if (prev && prev.s !== 'ok') {
+      const box = document.createElement('div'); box.id = 'crumbBox';
+      box.style.cssText = 'position:fixed;left:12px;right:12px;bottom:12px;z-index:50;padding:10px 12px;border-radius:12px;background:rgba(120,30,30,.9);color:#fff;font:600 13px/1.35 system-ui,sans-serif;pointer-events:auto';
+      box.textContent = 'Last time the game stopped at: ' + Object.entries(prev).map(([k, v]) => k + '=' + v).join(' · ') + '  (tap to hide)';
+      box.addEventListener('click', () => box.remove()); document.body.appendChild(box);
+      window.__prevCrumb = prev;
+    }
+  } catch (_) {}
+  CRUMB.ctx = { dpr: window.devicePixelRatio, scr: screen.width + 'x' + screen.height };
+  CRUMB.set('start');
+  new MutationObserver(() => { if (statusEl.textContent) CRUMB.set(statusEl.textContent.slice(0, 50)); }).observe(statusEl, { childList: true, characterData: true, subtree: true });
   const isTouch = window.matchMedia('(pointer: coarse)').matches, isMobile = isTouch || Math.min(screen.width, screen.height) < 700;
   const ASSETS = new URL('../assets/', location.href), assetUrl = (p) => new URL(p, ASSETS).href;
   const V3 = BABYLON.Vector3, C3 = BABYLON.Color3;
@@ -218,6 +234,7 @@ bool inTunnelMouth(vec3 p) {
   const SAFE = { on: false };     // set by the frame watchdog: drops the expensive passes after very long frames
   console.log('GPU benchmark', benchMs.toFixed(2), 'ms ->', tierName);
   let renderScale = +(QS.get('scale') || Q.scale[2]);
+  CRUMB.ctx.tier = tierName;
   engine.setHardwareScalingLevel(1 / renderScale);
   const scene = new BABYLON.Scene(engine, { useFloatingOrigin: !QS.has('nofloat') });     // camera-relative rendering: no precision loss 10 km from the origin
   // built-in profiler (window.__prof): ms accumulated per per-frame callback (named by where it was registered) and per physics step part
@@ -4196,11 +4213,13 @@ void main() {
     const cb0 = Object.entries(PROF).reduce((a, [k, v]) => (k.startsWith('cb') ? a + v : a), 0), r0 = performance.now();
     // errors inside Babylon reach window.onerror as a bare "Script error." (the CDN script is cross-origin): catch them here,
     // show the message and where it came from, and stop rather than repeat it every frame
+    { const nf0 = (window.__frameLog || []).length + 1; if (nf0 <= 5) CRUMB.set('frame ' + nf0 + ' starting'); }
     try { scene.render(); } catch (e) {
       engine.stopRenderLoop(); const at = String((e && e.stack) || '').split('\n').slice(0, 4).map((l) => l.trim().replace(/https?:\/\/[^/]+\//, '')).join(' | ');
       fail('Something went wrong while rendering: ' + ((e && e.message) || e) + ' [' + at + ']'); console.error(e); return; }
     const r1 = performance.now(), cb1 = Object.entries(PROF).reduce((a, [k, v]) => (k.startsWith('cb') ? a + v : a), 0);
-    const FL = window.__frameLog = window.__frameLog || []; if (FL.length < 400) FL.push([Math.round(dt), Math.round(r1 - r0), Math.round(cb1 - cb0)]);
+    const FL = window.__frameLog = window.__frameLog || [];
+    const nf = FL.length + 1; if (nf <= 5 || nf === 10 || nf === 30 || nf === 100) CRUMB.set('frame ' + nf + ' drawn', { scale: renderScale, canvas: engine.getRenderWidth() + 'x' + engine.getRenderHeight() }); else if (nf === 300) CRUMB.set('ok'); if (FL.length < 400) FL.push([Math.round(dt), Math.round(r1 - r0), Math.round(cb1 - cb0)]);
   });
   window.addEventListener('resize', () => engine.resize());
   let frames = 0; scene.onAfterRenderObservable.add(() => frames++);
