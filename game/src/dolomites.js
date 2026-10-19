@@ -4,6 +4,21 @@
 // sun moves), sun with terrain shadows baked on the GPU per sun change, ambient cube from the same sky, aerial perspective with the
 // same scattering coefficients, and a height-fog layer for low cloud.
 (async () => {
+  // &memtrace (memory work, 2026-10-19): typed arrays of 256 KB or more are recorded with the code line that made them (weak
+  // references only); window.__memTrace() reports the ones still alive, summed per line and per backing buffer.
+  if (new URLSearchParams(location.search).has('memtrace')) {
+    const live = [];
+    for (const name of ['Float32Array', 'Float64Array', 'Uint8Array', 'Uint8ClampedArray', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array']) {
+      const Base = window[name];
+      const Traced = class extends Base { constructor(...a) { super(...a); if (this.byteLength >= 262144) {
+        const st = (new Error().stack || '').split('\n').slice(2).find((l) => !/babylon\.js/.test(l)) || '?';
+        live.push({ r: new WeakRef(this.buffer), where: st.replace(/^\s*at\s*/, '').replace(/https?:\/\/[^/]+\//, '').replace(/\?v=\d+/, '').slice(0, 90) }); } } };
+      Object.defineProperty(Traced, 'name', { value: name }); window[name] = Traced;
+    }
+    window.__memTrace = () => { const seen = new Set(), by = {};
+      for (const e of live) { const b = e.r.deref(); if (!b || seen.has(b)) continue; seen.add(b); by[e.where] = (by[e.where] || 0) + b.byteLength; }
+      return Object.entries(by).sort((x, y) => y[1] - x[1]).slice(0, 25).map(([w, v]) => Math.round(v / 1e6) + ' MB  ' + w); };
+  }
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   const fail = (t) => { statusEl.hidden = false; statusEl.textContent = t; window.__err = window.__err || t; };      // __err: the test runner stops at once
@@ -31,14 +46,15 @@
   const LVL = WORLD.levels.map((L, i) => ({ ...L, i, half: L.extent / 2, cx: L.center[0], cz: L.center[1], edge: 2 * L.res, fade: Math.max(250, 40 * L.res) }));
   const NL = LVL.length, LV = LVL.map((L) => L.name), FAR_I = NL - 1, MID_I = LV.indexOf('mid');
   const bins = await Promise.all(LV.map((k) => getBin(MAP + k + '.bin')));
-  const HT = {};      // CPU heights (local y) per level
-  LV.forEach((k, i) => { const L = LVL[i], u = new Uint16Array(bins[i]), f = new Float32Array(u.length); for (let j = 0; j < u.length; j++) f[j] = L.offset + u[j] * L.scale; HT[k] = f; });     // world.json encodes local y directly
+  // CPU heights per level, kept as the file's 16-bit codes (local y = offset + code * scale; world.json encodes local y directly):
+  // half the memory of Float32 copies, and decoding is linear, so it commutes with the bilinear filter below
+  const HT = {}; LV.forEach((k, i) => { HT[k] = new Uint16Array(bins[i]); });
   const lvl = (k) => LVL[LV.indexOf(k)];
   const sampleLevel = (k, x, z) => {
     const L = lvl(k), gx = (x - (L.cx - L.half)) / L.res - 0.5, gz = ((L.cz + L.half) - z) / L.res - 0.5;
     const ix = Math.max(0, Math.min(N - 2, Math.floor(gx))), iz = Math.max(0, Math.min(N - 2, Math.floor(gz))), fx = Math.min(1, Math.max(0, gx - ix)), fz = Math.min(1, Math.max(0, gz - iz));
     const h = HT[k], a = h[iz * N + ix], b = h[iz * N + ix + 1], c = h[(iz + 1) * N + ix], d = h[(iz + 1) * N + ix + 1];
-    return (a + (b - a) * fx) * (1 - fz) + (c + (d - c) * fx) * fz;
+    return L.offset + L.scale * ((a + (b - a) * fx) * (1 - fz) + (c + (d - c) * fx) * fz);
   };
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
   const levelWeight = (L, x, z) => { if (L.i === FAR_I) return 1; const m = Math.max(Math.abs(x - L.cx), Math.abs(z - L.cz)); return 1 - smooth(L.half - L.edge - L.fade, L.half - L.edge, m); };
@@ -160,7 +176,10 @@ bool inTunnelMouth(vec3 p) {
   // ---------- engine ----------
   const canvas = $('c');
   // the look-dev shaders are GLSL for now (WGSL ports come once the look is accepted): WebGL2 only
-  const engine = new BABYLON.Engine(canvas, true, { stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: QS.has('shot') }, true);
+  // doNotHandleContextLost: Babylon otherwise keeps a CPU copy of every texture and vertex buffer to rebuild them after a lost
+  // GPU context (about 400 MB here, part of what crashed phone and Safari tabs while loading). A lost context now asks for a reload.
+  const engine = new BABYLON.Engine(canvas, true, { stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: QS.has('shot'), doNotHandleContextLost: true }, true);
+  engine.onContextLostObservable.add(() => fail('The graphics context was lost (often low memory). Please reload the page.'));
   engine.useReverseDepthBuffer = true;
   // ---------- quality tier: a short GPU benchmark at load picks it (?quality=low|medium|high|ultra overrides); resolution then adapts ----------
   const DPR = Math.min(window.devicePixelRatio || 1, 2);
@@ -378,7 +397,9 @@ vec3 aerial(vec3 col, vec3 wpos) {
   // level lookup, generated for however many levels the world has: heights (manual bilinear from an R32F array), normals,
   // detail maps (A: scree, outcrop, gully, canopy; B: road distance, vineyard, orchard/olive, urban) and one shadow texture per level
   const GL_LEVELS = `
-uniform highp sampler2DArray hArr;
+uniform highp usampler2DArray hArr;      // 16-bit height codes (R16UI), decoded per level by lvHf
+uniform float lvHf[${NL * 2}];
+float hTex(ivec3 p) { return lvHf[p.z * 2] + lvHf[p.z * 2 + 1] * float(texelFetch(hArr, p, 0).r); }
 uniform float lvDf[${NL * 4}];          // per level: centre x, centre z, half extent, texel size (floats: settable from ProceduralTexture too)
 uniform float patchCf[${PATCH_C.length * 3}];     // per patch: centre x, z, vertical offset
 vec4 LVD(int i) { return vec4(lvDf[i * 4], lvDf[i * 4 + 1], lvDf[i * 4 + 2], lvDf[i * 4 + 3]); }
@@ -396,7 +417,7 @@ float hFetchL(int i, vec2 xz) {
   vec2 g = vec2(xz.x - (L.x - L.z), (L.y + L.z) - xz.y) / L.w - 0.5;
   vec2 f = fract(g); ivec2 c = ivec2(floor(g));
   ivec2 c0 = clamp(c, ivec2(0), ivec2(${N - 1})), c1 = clamp(c + 1, ivec2(0), ivec2(${N - 1}));
-  float a = texelFetch(hArr, ivec3(c0, i), 0).r, b = texelFetch(hArr, ivec3(c1.x, c0.y, i), 0).r, cc = texelFetch(hArr, ivec3(c0.x, c1.y, i), 0).r, d = texelFetch(hArr, ivec3(c1, i), 0).r;
+  float a = hTex(ivec3(c0, i)), b = hTex(ivec3(c1.x, c0.y, i)), cc = hTex(ivec3(c0.x, c1.y, i)), d = hTex(ivec3(c1, i));
   return mix(mix(a, b, f.x), mix(cc, d, f.x), f.y);
 }
 int baseLevel(vec2 xz) { for (int i = 0; i < NL; i++) if (lvW(i, xz) >= 1.0) return i; return FAR_I; }
@@ -439,7 +460,7 @@ float sunShadow(vec2 xz) {
   return s;
 }
 `;
-  const LEVEL_UNIFORMS = ['lvDf', 'patchCf'], LEVEL_SAMPLERS = ['hArr', ...LVL.map((L) => 's' + L.i)];
+  const LEVEL_UNIFORMS = ['lvDf', 'lvHf', 'patchCf'], LEVEL_SAMPLERS = ['hArr', ...LVL.map((L) => 's' + L.i)];
 
   // ---------- the car on the ground: a sun-projected mask of a low-poly stand-in (soft, follows the car) and an analytic contact shadow ----------
   const GL_CAR = `
@@ -477,30 +498,40 @@ float carAO(vec3 p) {
     const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
     const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0); return cx.getImageData(0, 0, bmp.width, bmp.height).data;
   };
-  const hData = new Float32Array(N * N * NL); LV.forEach((k, i) => hData.set(HT[k], i * N * N));
-  const hArr = new BABYLON.RawTexture2DArray(hData, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_R, scene, false, false, BABYLON.Texture.NEAREST_SAMPLINGMODE, BABYLON.Engine.TEXTURETYPE_FLOAT);
-  const nData = new Uint8Array(N * N * 4 * NL), aData = new Uint8Array(N * N * 4 * NL), bData = new Uint8Array(N * N * 4 * NL);
-  const DETAIL_PX = {};     // CPU copies of A and B for the detail levels (grass placement)
-  await Promise.all(LVL.map(async (L) => {
-    const o = L.i * N * N * 4;
-    nData.set(await imgBytes(MAP + L.name + '_n.png'), o);
-    if (L.detail) {
-      const [m, c, r, lu] = await Promise.all(['_m.png', '_c.png', '_r.png', '_l.png'].map((x) => imgBytes(MAP + L.name + x)));
-      for (let p = 0; p < N * N; p++) { const q = p * 4;
-        aData[o + q] = m[q]; aData[o + q + 1] = m[q + 1]; aData[o + q + 2] = m[q + 2]; aData[o + q + 3] = c[q];
-        bData[o + q] = r[q]; bData[o + q + 1] = lu[q]; bData[o + q + 2] = lu[q + 1]; bData[o + q + 3] = lu[q + 2]; }
-      DETAIL_PX[L.name] = { a: aData.subarray(o, o + N * N * 4), b: bData.subarray(o, o + N * N * 4) };
-    }
-  }));
-  // no mipmaps: Babylon does not build them for raw 2D arrays, and sampling missing levels returned garbage at distance
-  const mkArr = (d) => { const t = new BABYLON.RawTexture2DArray(d, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, false, false, BABYLON.Texture.BILINEAR_SAMPLINGMODE); t.wrapU = t.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE; return t; };
-  const nArr = mkArr(nData), aArr = mkArr(aData), bArr = mkArr(bData);
+  // GPU arrays are built in a block so the staging copies (300+ MB) are freed after upload (the engine keeps no copies either)
+  let hArr, nArr, aArr, bArr;
+  // CPU detail lookups need three answers only: one byte per texel, bit 0 open ground for grass (no canopy, scree, outcrop, town,
+  // vines or orchards), bit 1 vineyard, bit 2 orchard/olive. 4 MB per detail level instead of two 16 MB copies.
+  const DETAIL_F = {};
+  {
+    const hData = new Uint16Array(N * N * NL); LV.forEach((k, i) => hData.set(HT[k], i * N * N));
+    hArr = new BABYLON.RawTexture2DArray(hData, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RED_INTEGER, scene, false, false, BABYLON.Texture.NEAREST_SAMPLINGMODE, BABYLON.Engine.TEXTURETYPE_UNSIGNED_SHORT);
+    const nData = new Uint8Array(N * N * 4 * NL), aData = new Uint8Array(N * N * 4 * NL), bData = new Uint8Array(N * N * 4 * NL);
+    await Promise.all(LVL.map(async (L) => {
+      const o = L.i * N * N * 4;
+      nData.set(await imgBytes(MAP + L.name + '_n.png'), o);
+      if (L.detail) {
+        const [m, c, r, lu] = await Promise.all(['_m.png', '_c.png', '_r.png', '_l.png'].map((x) => imgBytes(MAP + L.name + x)));
+        const F = new Uint8Array(N * N);
+        for (let p = 0; p < N * N; p++) { const q = p * 4;
+          aData[o + q] = m[q]; aData[o + q + 1] = m[q + 1]; aData[o + q + 2] = m[q + 2]; aData[o + q + 3] = c[q];
+          bData[o + q] = r[q]; bData[o + q + 1] = lu[q]; bData[o + q + 2] = lu[q + 1]; bData[o + q + 3] = lu[q + 2];
+          const scree = m[q], outcrop = m[q + 1], canopy = c[q], vine = lu[q], orchard = lu[q + 1], urban = lu[q + 2];
+          F[p] = (canopy < 8 && scree < 90 && outcrop < 170 && urban < 60 && vine < 60 && orchard < 60 ? 1 : 0) | (vine >= 140 ? 2 : 0) | (orchard >= 140 ? 4 : 0); }
+        DETAIL_F[L.name] = F;
+      }
+    }));
+    // no mipmaps: Babylon does not build them for raw 2D arrays, and sampling missing levels returned garbage at distance
+    const mkArr = (d) => { const t = new BABYLON.RawTexture2DArray(d, N, N, NL, BABYLON.Engine.TEXTUREFORMAT_RGBA, scene, false, false, BABYLON.Texture.BILINEAR_SAMPLINGMODE); t.wrapU = t.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE; return t; };
+    nArr = mkArr(nData); aArr = mkArr(aData); bArr = mkArr(bData);
+  }
+  const lvHArr = LVL.flatMap((L) => [L.offset, L.scale]);
   const lvDArr = LVL.flatMap((L) => [L.cx, L.cz, L.half, L.res]), patchCArr = PATCH_C.flat();
   // CPU lookup of the detail maps at a world point (finest covering detail level)
   const detailAt = (x, z) => {
     for (const L of LVL) { if (!L.detail || levelWeight(L, x, z) < 0.5) continue;
-      const c = Math.max(0, Math.min(N - 1, Math.floor((x - (L.cx - L.half)) / L.res))), r = Math.max(0, Math.min(N - 1, Math.floor(((L.cz + L.half) - z) / L.res))), q = (r * N + c) * 4, P_ = DETAIL_PX[L.name];
-      return { scree: P_.a[q], outcrop: P_.a[q + 1], canopy: P_.a[q + 3], road: P_.b[q], vine: P_.b[q + 1], orchard: P_.b[q + 2], urban: P_.b[q + 3] }; }
+      const c = Math.max(0, Math.min(N - 1, Math.floor((x - (L.cx - L.half)) / L.res))), r = Math.max(0, Math.min(N - 1, Math.floor(((L.cz + L.half) - z) / L.res))), f = DETAIL_F[L.name][r * N + c];
+      return { open: (f & 1) > 0, vine: (f & 2) > 0, orchard: (f & 4) > 0 }; }
     return null;
   };
   // ---------- detail texture arrays (CC0 scans, packed by tools/terrain/pack_textures.py) ----------
@@ -552,7 +583,7 @@ void main() {
     const size = L.i === 0 ? Q.shadowNear : L.res <= 4 ? 2048 : 1024;
     const pt = new BABYLON.ProceduralTexture('shadow_' + L.name, size, 'terrainShadow', scene, null, false, false);
     pt.refreshRate = 0; pt.wrapU = pt.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
-    pt.setTexture('hArr', hArr); pt.setFloats('lvDf', lvDArr); pt.setFloats('patchCf', patchCArr);
+    pt.setTexture('hArr', hArr); pt.setFloats('lvDf', lvDArr); pt.setFloats('lvHf', lvHArr); pt.setFloats('patchCf', patchCArr);
     pt.setVector4('thisL', new BABYLON.Vector4(L.cx, L.cz, L.half, L.res)); pt.setTexture('skyLUT', skyLUT); pt.setVector3('sunDir', new V3(0, 1, 0)); pt.setFloat('pen', 0.02); pt.setFloat('cheap', 1);   // every uniform must be set before the effect compiles
     pt.isEnabled = false; pt.autoClear = false; pt.size_ = size;
     // a tile, when set, limits the pass to that rectangle (GL scissor); off again right after
@@ -1025,7 +1056,7 @@ void main() {
   // materials sharing the world lighting get the same uniforms every frame
   const worldMats = [terrainMat];
   const bindLevels = (m) => {
-    m.setTexture('hArr', hArr); m.setFloats('lvDf', lvDArr); m.setFloats('patchCf', patchCArr);
+    m.setTexture('hArr', hArr); m.setFloats('lvDf', lvDArr); m.setFloats('lvHf', lvHArr); m.setFloats('patchCf', patchCArr);
     for (const L of LVL) m.setTexture('s' + L.i, shadowTex[L.name]);
     m.setTexture('skyLUT', skyLUT);
   };
@@ -1310,8 +1341,8 @@ void main() {
   // ---------- signs of life: real buildings (OSM footprints), malgas, guard rails, road posts, fences, crosses, lifts, cows ----------
   const PROPS = await getJSON(MAP + 'props.json');
   const Geo = () => {      // accumulates coloured boxes and gable prisms into a few big meshes (one draw each; split every ~400k vertices)
-    let pos = [], nrm = [], col = [], idx = []; const chunks = [];
-    const flush = () => { if (!idx.length) return; const v = new BABYLON.VertexData(); v.positions = new Float32Array(pos); v.normals = new Float32Array(nrm); v.colors = new Float32Array(col); v.indices = new Uint32Array(idx); chunks.push(v); pos = []; nrm = []; col = []; idx = []; };
+    let pos = [], nrm = [], col = [], idx = [], doneTris = 0; const chunks = [];
+    const flush = () => { if (!idx.length) return; const v = new BABYLON.VertexData(); v.positions = new Float32Array(pos); v.normals = new Float32Array(nrm); v.colors = new Float32Array(col); v.indices = new Uint32Array(idx); doneTris += idx.length / 3; chunks.push(v); pos = []; nrm = []; col = []; idx = []; };
     const room = () => { if (pos.length > 1200000) flush(); };
     const quad = (a, b, c, d, n, k) => { room(); const o = pos.length / 3; for (const p of [a, b, c, d]) { pos.push(p[0], p[1], p[2]); nrm.push(n[0], n[1], n[2]); col.push(k[0], k[1], k[2], k[3] === undefined ? 1 : k[3]); } idx.push(o, o + 1, o + 2, o, o + 2, o + 3); };
     const tri = (a, b, c, n, k) => { room(); const o = pos.length / 3; for (const p of [a, b, c]) { pos.push(p[0], p[1], p[2]); nrm.push(n[0], n[1], n[2]); col.push(k[0], k[1], k[2], k[3] === undefined ? 1 : k[3]); } idx.push(o, o + 1, o + 2); };
@@ -1348,8 +1379,10 @@ void main() {
       quad(P(-hx, ye - 0.18, -hz), P(-hx, ye - 0.18, hz), P(-hx, ye, hz), P(-hx, ye, -hz), R(yaw, -1, 0, 0), k);
       quad(P(-hx, ye - 0.18, -hz), P(hx, ye - 0.18, -hz), P(hx, ye - 0.18, hz), P(-hx, ye - 0.18, hz), [0, -1, 0], k);
     };
-    let tris = 0; const vds = () => { flush(); return chunks; };
-    return { box, roof, hip, quad, vds, count: () => chunks.reduce((a, v) => a + v.indices.length / 3, 0) + idx.length / 3 };
+    // vds() hands the chunks over and forgets them: the builders live on in cell maps, and keeping the chunks kept every
+    // building's vertex arrays alive (214 MB) after upload (memory work, 2026-10-19)
+    let tris = 0; const vds = () => { flush(); return chunks.splice(0); };
+    return { box, roof, hip, quad, vds, count: () => doneTris + idx.length / 3 };
   };
   // albedo targets; the 4th value picks the texture layer (assets/textures/props: 0 weathered boards, 1 dark planks, 2 plaster, 3 stone wall, 4 shingles, 5 galvanised steel)
   const L = (i) => (i + 0.5) / 8, LYR = L;     // LYR: same, for code where L is a building's length
@@ -1677,7 +1710,7 @@ void main() {
       if (!L_.detail || L_.res > 4) continue;
       const step = 8;
       for (let x = L_.cx - L_.half; x < L_.cx + L_.half; x += step) for (let z = L_.cz - L_.half; z < L_.cz + L_.half; z += step) {
-        const d = detailAt(x, z); if (!d || d.vine < 140) continue;
+        const d = detailAt(x, z); if (!d || !d.vine) continue;
         if (levelWeight(L_, x, z) < 0.99) continue;
         const rd = roadNear(x, z); if (rd > 450 || rd < 9) continue;      // visible from the road: the Adige vineyards sit a few hundred metres off the A22
         if (structAt(x, z)) continue;
@@ -1720,7 +1753,7 @@ void main() {
       if (!L_.detail || L_.res > 4) continue;
       const step = 10;
       for (let x = L_.cx - L_.half; x < L_.cx + L_.half; x += step) for (let z = L_.cz - L_.half; z < L_.cz + L_.half; z += step) {
-        const d = detailAt(x, z); if (!d || d.orchard < 140) continue;
+        const d = detailAt(x, z); if (!d || !d.orchard) continue;
         if (levelWeight(L_, x, z) < 0.99) continue;
         const rd = bRoadDist(x, z); if (rd > 450 || rd < 10) continue;
         if (structAt(x, z) || patchAt(x, z) !== 'bolzano') continue;
@@ -2401,7 +2434,7 @@ void main() {
     let seed = 7; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
     const alt = (x, z) => terrainH(x, z) * INV_S + Y0 - patchOffsetJS(x, z);       // real altitude
     const slope = (x, z) => Math.hypot(terrainH(x + 1, z) - terrainH(x - 1, z), terrainH(x, z + 1) - terrainH(x, z - 1)) / 2;
-    const open = (x, z) => { const d = detailAt(x, z); return !!d && d.canopy < 8 && d.scree < 90 && d.outcrop < 170 && d.urban < 60 && d.vine < 60 && d.orchard < 60 && !inBuilding(x, z); };
+    const open = (x, z) => { const d = detailAt(x, z); return !!d && d.open && !inBuilding(x, z); };
     // a beam between two points (square section, half size r): rails, necks, tails
     const beam = (G, a, b, r, k) => {
       const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], dl = Math.hypot(...d) || 1, dn = d.map((v) => v / dl);
@@ -3863,7 +3896,7 @@ void main() {
   // Babylon rewrites varying and attribute lines statement by statement, splitting at ';' even inside a trailing // comment: the rest
   // of the comment became code (2026-10-17). Such a line stops the load here with a clear error.
   for (const [k, src] of Object.entries(BABYLON.Effect.ShadersStore)) if (typeof src === 'string' && /(Vertex|Fragment)Shader$/.test(k) && !/^(default|pbr|standard)/.test(k)) {
-    const bad = src.split('\n').find((l) => /\b(varying|attribute)\b/.test(l) && /\/\/.*;/.test(l));
+    const bad = src.split('\n').find((l) => /\b(varying|attribute|uniform)\b/.test(l) && /\/\/.*;/.test(l));
     if (bad) { window.__err = (window.__err ? window.__err + ' | ' : '') + 'semicolon in a GLSL comment on a varying/attribute line: ' + k; console.error('GLSL comment with ;', k, bad); } }
   for (const m of scene.materials) if (m.getClassName && m.getClassName() === 'ShaderMaterial') { const prev = m.onError; m.onError = (eff, errs) => { window.__err = (window.__err ? window.__err + ' | ' : '') + m.name + ': ' + String(errs).slice(0, 300); console.error('shader error', m.name, errs); if (prev) prev(eff, errs); }; }
   // Chrome's Metal backend builds each shader's GPU pipeline lazily, on its first draw into each kind of target (70-500 ms
@@ -4078,6 +4111,22 @@ void main() {
     show(`DIAG COMPLETE. Worst normal frame ${worst.toFixed(0)} ms. Send me the log file.`); window.__diagDone = true; window.__watchdog = 'stopped';
   }
   statusEl.hidden = true;
+  // release CPU copies of static geometry (task A, 2026-10-19): Babylon keeps every vertex, index and thin-instance array after
+  // upload (~400 MB here). Nothing reads them back except picking (pickable meshes keep theirs), updatable buffers and the
+  // per-mesh GPU diagnostic (done by now). Meshes built later (grass tiles, spray) are untouched. &keepgeo: keep everything.
+  if (!QS.has('keepgeo')) {
+    let freed = 0;
+    for (const g of scene.geometries) {
+      if (!g.meshes.length || g.meshes.some((m) => m.isPickable)) continue;
+      for (const k in g._vertexBuffers) { const b = g._vertexBuffers[k]._buffer; if (b && !b.isUpdatable() && b._data) { freed += b._data.byteLength || b._data.length * 4; b._data = null; } }
+      if (g._indices && g._indices.length) { freed += g._indices.byteLength || g._indices.length * 4; g._indices = []; }
+    }
+    for (const m of scene.meshes) {
+      const s = m._thinInstanceDataStorage;
+      if (s && s.matrixData && !m.isPickable && s.matrixBuffer && !s.matrixBuffer.isUpdatable()) { freed += s.matrixData.byteLength; s.matrixData = null; s.matrixBuffer._data = null; }
+    }
+    window.__geoFreedMB = Math.round(freed / 1e6);
+  }
   if (modeChip && !DRIVE) modeChip.textContent = 'Dolomites look-dev · G: look panel · WASD + mouse: fly';
   // frame watchdog: a frame over 250 ms (twice) drops the expensive passes; over 2 s the loop stops rather than keep a hung GPU busy
   let wdLast = performance.now(), wdSlow = 0, wdFrames = 0, wdHung = 0;
@@ -4114,7 +4163,7 @@ void main() {
   });
   const inst = new BABYLON.EngineInstrumentation(engine); inst.captureGPUFrameTime = true;
   const sinst = new BABYLON.SceneInstrumentation(scene); sinst.captureFrameTime = true;
-  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, detailAt, aData, LVL, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
+  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, detailAt, LVL, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
     setPreset: (p) => { Object.assign(P, PRESETS[p]); updateAtmosphere(); applyLook(); },
     set: (o) => { Object.assign(P, o); updateAtmosphere(); applyLook(); },
     get frames() { return frames; }, get nodes() { return nodeCount; },
