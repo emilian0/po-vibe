@@ -254,8 +254,13 @@ bool inTunnelMouth(vec3 p) {
   };
   const benchMs = await benchGPU();
   let tierName = QS.get('quality');
-  if (!TIERS[tierName]) tierName = isMobile ? (benchMs < 4 ? 'medium' : 'low') : benchMs < 1.0 ? 'ultra' : benchMs < 2.2 ? 'high' : benchMs < 7 ? 'medium' : 'low';     // AMD Radeon Pro 5500M ~3 ms -> medium
+  // phones (2026-10-19): medium, tuned below. The limit on phones is memory, not GPU time (an iPhone held 60 fps at low and
+  // medium measured within ~20 MB of low), and the resolution adapts to the GPU anyway
+  if (!TIERS[tierName]) tierName = isMobile ? 'medium' : benchMs < 1.0 ? 'ultra' : benchMs < 2.2 ? 'high' : benchMs < 7 ? 'medium' : 'low';     // AMD Radeon Pro 5500M ~3 ms -> medium
   const Q = Object.assign({}, TIERS[tierName]);
+  // phone tuning: no multisampling (4x MSAA buffers; the phone crashed with it) and the resolution may climb to 2 device px per
+  // CSS px, which sharpens a phone screen more than MSAA would
+  if (isMobile && tierName === 'medium') { Q.msaa = 1; Q.scale = [0.6, DPR, 1.0]; }
   for (const [k, v] of QS) if (k.startsWith('q.') && k.slice(2) in Q && !Array.isArray(Q[k.slice(2)])) Q[k.slice(2)] = +v;      // test overrides, e.g. &q.msaa=1
   const SAFE = { on: false };     // set by the frame watchdog: drops the expensive passes after very long frames
   console.log('GPU benchmark', benchMs.toFixed(2), 'ms ->', tierName);
@@ -1383,7 +1388,7 @@ void main() {
   BABYLON.Effect.ShadersStore.propVertexShader = `precision highp float; uniform vec3 floatO;
 attribute vec3 position; attribute vec3 normal; attribute vec4 color;
 uniform mat4 world; uniform mat4 viewProjection; varying vec3 vPos; varying vec3 vN; varying vec4 vCol;
-void main() { vec4 w = world * vec4(position, 1.0); vPos = w.xyz + floatO; vN = normalize(mat3(world) * normal); vCol = color; gl_Position = viewProjection * w; }`;     // world is origin-relative under floating origin
+void main() { vec4 w = world * vec4(position, 1.0); vPos = w.xyz + floatO; vN = normalize(mat3(world) * normal); vCol = color * vec4(vec3(1.0 / 255.0), 1.0 / 128.0); gl_Position = viewProjection * w; }`;     // world is origin-relative under floating origin
   BABYLON.Effect.ShadersStore.propFragmentShader = GL_COMMON + GL_LEVELS + GL_SHADOWED + `
 uniform highp sampler2DArray propAlb; uniform highp sampler2DArray propNH; uniform vec3 propMean[6]; uniform float propScale[6];
 varying vec3 vPos; varying vec3 vN; varying vec4 vCol;
@@ -1458,7 +1463,7 @@ void main() {
   }
   propMat.backFaceCulling = false;     // generated boxes and roofs mix face orientations; normals are explicit
   bindLevels(propMat); worldMats.push(propMat);
-  const tint = (m, c) => { const n = m.getTotalVertices(), a = new Float32Array(n * 4); for (let i = 0; i < n; i++) a.set([c[0], c[1], c[2], c[3] === undefined ? 1 : c[3]], i * 4); m.setVerticesData('color', a); return m; };
+  const tint = (m, c) => { const n = m.getTotalVertices(), a = new Float32Array(n * 4); for (let i = 0; i < n; i++) a.set([c[0] * 255, c[1] * 255, c[2] * 255, (c[3] === undefined ? 1 : c[3]) * 128], i * 4); m.setVerticesData('color', a); return m; };      // raw units (see col8)
   const prism = (name, w, h, len) => {     // gable roof: triangle in x/y extruded along z, flat-shaded
     const x = w / 2, z = len / 2, P = [[-x, 0, -z], [x, 0, -z], [0, h, -z], [-x, 0, z], [x, 0, z], [0, h, z]];
     const tris = [[0, 2, 1], [3, 4, 5], [0, 3, 5], [0, 5, 2], [1, 2, 5], [1, 5, 4], [0, 1, 4], [0, 4, 3]], pos = [], idx = [];
@@ -1510,9 +1515,21 @@ void main() {
   bindLevels(proxyMat); worldMats.push(proxyMat);
   // ---------- signs of life: real buildings (OSM footprints), malgas, guard rails, road posts, fences, crosses, lifts, cows ----------
   const PROPS = await getJSON(MAP + 'props.json');
+  // props vertex data in bytes (2026-10-19, phone memory): colours in 'raw units' (RGB x 255, alpha x 128: alpha is a material code
+  // in 1/16 steps, exact after the division in the shader), normals as signed bytes (exact for the axis-aligned faces, roof
+  // slopes within half a degree). A quarter of the float size, at the loading peak and on the GPU. The props shader reads raw
+  // units, so float colours must be in raw units too (tint(), sails).
+  const col8 = (c) => { const o = new Uint8Array(c.length); for (let i = 0; i < c.length; i++) o[i] = Math.round(c[i] * ((i & 3) === 3 ? 128 : 255)); return o; };
+  const nrm8 = (n) => { const o = new Int8Array(n.length / 3 * 4); for (let i = 0, j = 0; i < n.length; i += 3, j += 4) { o[j] = Math.round(n[i] * 127); o[j + 1] = Math.round(n[i + 1] * 127); o[j + 2] = Math.round(n[i + 2] * 127); } return o; };
+  const applyGeo = (v, m) => {
+    v.applyToMesh(m);
+    m.setVerticesBuffer(new BABYLON.VertexBuffer(engine, v.col8, 'color', false, false, 4, false, 0, 4, BABYLON.VertexBuffer.UNSIGNED_BYTE, false));
+    m.setVerticesBuffer(new BABYLON.VertexBuffer(engine, v.nrm8, 'normal', false, false, 4, false, 0, 3, BABYLON.VertexBuffer.BYTE, true));
+    v.col8 = v.nrm8 = null; return m;
+  };
   const Geo = () => {      // accumulates coloured boxes and gable prisms into a few big meshes (one draw each; split every ~400k vertices)
     let pos = [], nrm = [], col = [], idx = [], doneTris = 0; const chunks = [];
-    const flush = () => { if (!idx.length) return; const v = new BABYLON.VertexData(); v.positions = new Float32Array(pos); v.normals = new Float32Array(nrm); v.colors = new Float32Array(col); v.indices = new Uint32Array(idx); doneTris += idx.length / 3; chunks.push(v); pos = []; nrm = []; col = []; idx = []; };
+    const flush = () => { if (!idx.length) return; const v = new BABYLON.VertexData(); v.positions = new Float32Array(pos); v.indices = new Uint32Array(idx); doneTris += idx.length / 3; v.col8 = col8(col); v.nrm8 = nrm8(nrm); chunks.push(v); pos = []; nrm = []; col = []; idx = []; };
     const room = () => { if (pos.length > 1200000) flush(); };
     const quad = (a, b, c, d, n, k) => { room(); const o = pos.length / 3; for (const p of [a, b, c, d]) { pos.push(p[0], p[1], p[2]); nrm.push(n[0], n[1], n[2]); col.push(k[0], k[1], k[2], k[3] === undefined ? 1 : k[3]); } idx.push(o, o + 1, o + 2, o, o + 2, o + 3); };
     const tri = (a, b, c, n, k) => { room(); const o = pos.length / 3; for (const p of [a, b, c]) { pos.push(p[0], p[1], p[2]); nrm.push(n[0], n[1], n[2]); col.push(k[0], k[1], k[2], k[3] === undefined ? 1 : k[3]); } idx.push(o, o + 1, o + 2); };
@@ -1907,7 +1924,7 @@ void main() {
         }
       }
     }
-    for (const [k, gg] of VG) for (const v of gg.vds()) { const m = new BABYLON.Mesh('vines_' + k, scene); v.applyToMesh(m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); vineMeshes.push(m); }
+    for (const [k, gg] of VG) for (const v of gg.vds()) { const m = new BABYLON.Mesh('vines_' + k, scene); applyGeo(v, m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); vineMeshes.push(m); }
     console.log('vineyard row pieces', nRows);
   }
   // apple orchards of the Adige valley (OSM orchard landuse; at Garda the same class is olive groves, kept as single trees):
@@ -1948,7 +1965,7 @@ void main() {
         }
       }
     }
-    let ot = 0; for (const [k, gg] of OG) for (const v of gg.vds()) { ot += v.indices.length / 3; const m = new BABYLON.Mesh('orchard_' + k, scene); v.applyToMesh(m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); vineMeshes.push(m); }
+    let ot = 0; for (const [k, gg] of OG) for (const v of gg.vds()) { ot += v.indices.length / 3; const m = new BABYLON.Mesh('orchard_' + k, scene); applyGeo(v, m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); vineMeshes.push(m); }
     console.log('orchard row pieces', nRows, 'triangles', ot);
   }
   // viaducts: concrete deck edges and underside, piers every ~32 m down to the ground
@@ -2080,7 +2097,7 @@ void main() {
     }
   }
   let lifeCount = G_MAIN.count();
-  const lifeMesh = (v, name) => { const lm = new BABYLON.Mesh(name, scene); v.applyToMesh(lm); lm.material = propMat; lm.renderingGroupId = 1; lm.isPickable = false; lm.freezeWorldMatrix(); return lm; };
+  const lifeMesh = (v, name) => { const lm = new BABYLON.Mesh(name, scene); applyGeo(v, lm); lm.material = propMat; lm.renderingGroupId = 1; lm.isPickable = false; lm.freezeWorldMatrix(); return lm; };
   G_MAIN.vds().forEach((v, i) => lifeMesh(v, 'life' + i));
   for (const [k, g] of scells) { lifeCount += g.count(); g.vds().forEach((v, i) => lifeMesh(v, 'bSS' + k + '_' + i)); }
   const bLod = [];
@@ -2717,7 +2734,7 @@ void main() {
     }
     // meshes per cell, switched by distance
     const cells = [];
-    for (const c of PC.values()) for (const v of c.G.vds()) { const m = new BABYLON.Mesh('pasture_' + Math.round(c.cx) + '_' + Math.round(c.cz), scene); v.applyToMesh(m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); cells.push({ m, cx: c.cx, cz: c.cz }); }
+    for (const c of PC.values()) for (const v of c.G.vds()) { const m = new BABYLON.Mesh('pasture_' + Math.round(c.cx) + '_' + Math.round(c.cz), scene); applyGeo(v, m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); cells.push({ m, cx: c.cx, cz: c.cz }); }
     let pT = 0;
     scene.onBeforeRenderObservable.add(() => { const now = performance.now(); if (now - pT < 250) return; pT = now; const p = scene.activeCamera.position;
       for (const c of cells) { const on = Math.hypot(c.cx - p.x, c.cz - p.z) < 450 + PCELL * 0.71; if (c.m.isEnabled() !== on) c.m.setEnabled(on); } });
@@ -2869,7 +2886,7 @@ void main() {
       const mk = (name, mat, set) => { const m = new BABYLON.Mesh(name + Math.round(c.cx) + '_' + Math.round(c.cz), scene), vd = new BABYLON.VertexData(); set(vd); vd.applyToMesh(m); m.material = mat; m.isPickable = false; m.freezeWorldMatrix(); return m; };
       if (c.bidx.length) { const m = mk('streamBank_', bankMat, (vd) => { vd.positions = c.bpos; vd.normals = c.bnrm; vd.uvs = c.buv; vd.colors = c.bcol; vd.indices = c.bidx; }); m.renderingGroupId = 1; m.alphaIndex = 1; scells.push({ m, cx: c.cx, cz: c.cz }); }
       if (c.idx.length) { const m = mk('stream_', streamMat, (vd) => { vd.positions = c.pos; vd.indices = c.idx; vd.uvs = c.uv; vd.uvs2 = c.uv2; vd.colors = c.col; }); m.renderingGroupId = 1; m.alphaIndex = 2; scells.push({ m, cx: c.cx, cz: c.cz }); }
-      for (const v of c.G.vds()) { const m = new BABYLON.Mesh('streamProp_' + Math.round(c.cx) + '_' + Math.round(c.cz), scene); v.applyToMesh(m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); scells.push({ m, cx: c.cx, cz: c.cz }); }
+      for (const v of c.G.vds()) { const m = new BABYLON.Mesh('streamProp_' + Math.round(c.cx) + '_' + Math.round(c.cz), scene); applyGeo(v, m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); scells.push({ m, cx: c.cx, cz: c.cz }); }
     }
     let sT = 0;
     scene.onBeforeRenderObservable.add(() => { const now = performance.now(); if (now - sT < 300) return; sT = now; const p = scene.activeCamera.position;
@@ -3079,7 +3096,7 @@ void main() {
     for (const c of LC.values()) {
       for (const [b, mat, nm] of [[c.m, mownMat, 'mown_'], [c.t, trailMat, 'trail_']]) if (b.idx.length) { const m = new BABYLON.Mesh(nm + Math.round(c.cx) + '_' + Math.round(c.cz), scene), vd = new BABYLON.VertexData();
         vd.positions = b.pos; vd.normals = b.nrm; vd.uvs = b.uv; vd.uvs2 = b.uv2; vd.indices = b.idx; vd.applyToMesh(m); m.material = mat; m.renderingGroupId = 1; m.alphaIndex = 0; m.isPickable = false; m.freezeWorldMatrix(); lcells.push({ m, cx: c.cx, cz: c.cz, r: nm === 'trail_' ? 1400 : 1100 }); }
-      for (const v of c.G.vds()) { const m = new BABYLON.Mesh('hay_' + Math.round(c.cx) + '_' + Math.round(c.cz), scene); v.applyToMesh(m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); lcells.push({ m, cx: c.cx, cz: c.cz, r: 600 }); }
+      for (const v of c.G.vds()) { const m = new BABYLON.Mesh('hay_' + Math.round(c.cx) + '_' + Math.round(c.cz), scene); applyGeo(v, m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); lcells.push({ m, cx: c.cx, cz: c.cz, r: 600 }); }
     }
     let lT = 0;
     scene.onBeforeRenderObservable.add(() => { const now = performance.now(); if (now - lT < 300) return; lT = now; const p = scene.activeCamera.position;
@@ -3249,7 +3266,7 @@ void main() {
         }
       }
       spots.forEach((p, i) => { const yaw = rn() * 6.283; if (i % 3 === 2) motorboat(p, yaw, 6 + rn() * 3, i % 2 ? HULL : [0.5, 0.48, 0.42, L(2)]); else yacht(p, yaw, 8 + rn() * 4); });
-      const boatMeshes = BG.vds().map((v, i) => { const m = new BABYLON.Mesh('boats' + i, scene); v.applyToMesh(m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; return m; });
+      const boatMeshes = BG.vds().map((v, i) => { const m = new BABYLON.Mesh('boats' + i, scene); applyGeo(v, m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; return m; });
       scene.onBeforeRenderObservable.add(() => { const t = (performance.now() - t0) / 1000; for (const m of boatMeshes) m.position.y = Math.sin(t * 1.1) * 0.06; });
       console.log('boats', spots.length);
     }
@@ -3265,7 +3282,7 @@ void main() {
     }
     if (sp.length) {
       const sm = new BABYLON.Mesh('sails', scene), svd = new BABYLON.VertexData(); svd.positions = sp; svd.indices = si;
-      const cl = []; for (let v = 0; v < sp.length / 3; v++) cl.push(0.62, 0.61, 0.58, 2.5 / 8); svd.colors = cl;
+      const cl = []; for (let v = 0; v < sp.length / 3; v++) cl.push(0.62 * 255, 0.61 * 255, 0.58 * 255, 2.5 / 8 * 128); svd.colors = cl;      // colours in raw units (see col8)
       const nr = []; BABYLON.VertexData.ComputeNormals(sp, si, nr); svd.normals = nr; svd.applyToMesh(sm);
       sm.material = propMat; sm.renderingGroupId = 1; sm.isPickable = false;
       scene.onBeforeRenderObservable.add(() => { const t = (performance.now() - t0) / 1000; sm.position.x = Math.sin(t * 0.02) * 40; sm.position.z = Math.cos(t * 0.017) * 30; });
