@@ -246,10 +246,10 @@ bool inTunnelMouth(vec3 p) {
   // ---------- quality tier: a short GPU benchmark at load picks it (?quality=low|medium|high|ultra overrides); resolution then adapts ----------
   const DPR = Math.min(window.devicePixelRatio || 1, 2);
   const TIERS = {
-    low:    { scale: [0.6, DPR, 1.0], msaa: 1, lodR: 170, rockB: 1, tfade: [900, 1800],  shadowNear: 1024, grassR: 0,  treeIn: 0,   treeOut: 0,   rocksR: 300, probe: 64,  probeRate: 4, glass: 1024,   carMask: 256, photoAniso: 2 },
-    medium: { scale: [0.75, 1.25, 1.0], msaa: 4, lodR: 240, rockB: 2, tfade: [1400, 3000], shadowNear: 2048, grassR: 22, treeIn: 75,  treeOut: 100, rocksR: 450, probe: 128, probeRate: 3, glass: 1024, carMask: 512, photoAniso: 4 },
-    high:   { scale: [1.0, DPR, Math.min(DPR, 1.5)], msaa: 4, lodR: 320, rockB: 2, tfade: [1800, 4000], shadowNear: 2048, grassR: 32, treeIn: 105, treeOut: 135, rocksR: 650, probe: 128, probeRate: 2, glass: 1024, carMask: 512, photoAniso: 4 },
-    ultra:  { scale: [1.0, DPR, DPR], msaa: 4, lodR: 450, rockB: 3, tfade: [2500, 6000], shadowNear: 4096, grassR: 44, treeIn: 150, treeOut: 190, rocksR: 900, probe: 256, probeRate: 1, glass: 1024, carMask: 1024, photoAniso: 4 },
+    low:    { scale: [0.6, DPR, 1.0], msaa: 1, lodR: 170, rockB: 1, tfade: [900, 1800],  shadowNear: 1024, grassR: 0,  treeIn: 0,   treeOut: 0,   rocksR: 300, probe: 64,  probeRate: 4, glass: 1024,   carMask: 256, photoAniso: 2, leaf: 32 },
+    medium: { scale: [0.75, 1.25, 1.0], msaa: 4, lodR: 240, rockB: 2, tfade: [1400, 3000], shadowNear: 2048, grassR: 22, treeIn: 75,  treeOut: 100, rocksR: 450, probe: 128, probeRate: 3, glass: 1024, carMask: 512, photoAniso: 4, leaf: 16 },
+    high:   { scale: [1.0, DPR, Math.min(DPR, 1.5)], msaa: 4, lodR: 320, rockB: 2, tfade: [1800, 4000], shadowNear: 2048, grassR: 32, treeIn: 105, treeOut: 135, rocksR: 650, probe: 128, probeRate: 2, glass: 1024, carMask: 512, photoAniso: 4, leaf: 16 },
+    ultra:  { scale: [1.0, DPR, DPR], msaa: 4, lodR: 450, rockB: 3, tfade: [2500, 6000], shadowNear: 4096, grassR: 44, treeIn: 150, treeOut: 190, rocksR: 900, probe: 256, probeRate: 1, glass: 1024, carMask: 1024, photoAniso: 4, leaf: 16 },
   };
   const benchGPU = () => {      // full-screen ALU + texture work into a 1024² target, timed to completion; ~3 ms on an AMD Radeon Pro 5500M
     try {
@@ -413,14 +413,47 @@ float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 
   return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), u.x), u.y); }
 float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * vnoise(p); p = mat2(1.6, 1.2, -1.2, 1.6) * p; a *= 0.5; } return s; }
 float fbm3(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 3; i++) { s += a * vnoise(p); p = mat2(1.6, 1.2, -1.2, 1.6) * p; a *= 0.5; } return s; }
-// micro-relief of the meadows near the camera (also displaces the mesh, so the shading normal is derived from this same function):
-// tussocks and hummocks, plus terracettes - the stepped grazing paths that follow the contours on alpine pasture slopes
-float microH(vec2 xz, float alt, float slope) {
-  float meadow = 1.0 - smoothstep(0.3, 0.45, slope);
-  float hum = (vnoise(xz * 0.45) - 0.5) * 0.36 + (vnoise(xz * 1.4 + 3.0) - 0.5) * 0.14;
-  float band = smoothstep(0.04, 0.09, slope) * (1.0 - smoothstep(0.22, 0.32, slope)) * smoothstep(0.45, 0.6, vnoise(xz * 0.04));
-  float terr = (abs(fract(alt / 0.85 + vnoise(xz * 0.12) * 1.5) - 0.5) * 2.0 - 0.5) * 0.26 * band;
-  return (hum + terr) * meadow;
+// micro-relief near the camera (also displaces the mesh, so the shading normal is derived from this same function): meadow
+// tussocks and hummocks plus terracettes (the stepped grazing paths along the contours of alpine pastures); since 2026-10-19 also
+// stones on scree and knobs on rocky ground, and a finer tussock band. cell: the mesh cell (vertex) or twice the pixel footprint
+// (fragment) at the point: a band shows only where it is well above that size, else it aliases into spikes or shimmer.
+// surface classes for the relief, a cheap version of the terrain shader's material rules (the same inputs in both shaders: the
+// finest level normal's slope, the real altitude, the detail maps): x scree, y rock short of a wall
+vec2 microClass(float alt, float slope, vec4 dA) {
+  float rock = smoothstep(0.25, 0.35, slope + 0.10 * smoothstep(2250.0, 2700.0, alt));
+  rock = max(rock, smoothstep(0.62, 0.82, dA.g) * smoothstep(1950.0, 2050.0, alt));
+  float scree = clamp((dA.r - 0.18) * 2.2, 0.0, 1.0) * (1.0 - rock);
+  return vec2(scree, rock * (1.0 - smoothstep(0.55, 0.7, slope)));
+}
+float microH(vec2 xz, float alt, float slope, float scree, float outc, float cell) {
+  // each band is evaluated only where its class is present and the band is visible (branches are coherent: the classes and the
+  // cell size change smoothly), so a meadow pixel pays for meadow noise only
+  float g1 = 1.0 - smoothstep(0.6, 1.2, cell), g2 = 1.0 - smoothstep(0.15, 0.3, cell);      // ~2-3 m bands, ~0.6 m bands
+  float meadow = (1.0 - smoothstep(0.3, 0.45, slope)) * (1.0 - scree) * (1.0 - outc);      // outc: rocky ground (microClass().y)
+  float r = 0.0;
+  if (meadow > 0.0) {
+    float hum = (vnoise(xz * 0.45) - 0.5) * 0.36;
+    if (g1 > 0.0) hum += (vnoise(xz * 1.4 + 3.0) - 0.5) * 0.14 * g1;
+    if (g2 > 0.0) hum += (vnoise(xz * 3.3 + 9.0) - 0.5) * 0.05 * g2;
+    float band = smoothstep(0.04, 0.09, slope) * (1.0 - smoothstep(0.22, 0.32, slope));
+    if (band * g1 > 0.0) band *= smoothstep(0.45, 0.6, vnoise(xz * 0.04));
+    float terr = band * g1 > 0.0 ? (abs(fract(alt / 0.85 + vnoise(xz * 0.12) * 1.5) - 0.5) * 2.0 - 0.5) * 0.26 * band * g1 : 0.0;
+    r += (hum + terr) * meadow;
+  }
+  // scree: angular stones of ~0.4-1 m (cubed noise: mostly flat with raised clasts), centred so the ground does not rise
+  if (scree > 0.0 && g1 > 0.0) {
+    float st = (pow(vnoise(xz * 1.3 + 17.0), 3.0) - 0.14) * 0.55 * g1;
+    if (g2 > 0.0) st += (pow(vnoise(xz * 3.1 + 29.0), 3.0) - 0.14) * 0.22 * g2;
+    r += st * scree;
+  }
+  // rocky ground short of a wall (walls get the rock carving): rounded knobs and small ledges
+  if (outc > 0.0) {
+    float kn = (0.67 - abs(2.0 * vnoise(xz * 0.35 + 41.0) - 1.0)) * 0.8;
+    if (g1 > 0.0) kn += (0.67 - abs(2.0 * vnoise(xz * 1.1 + 53.0) - 1.0)) * 0.3 * g1;
+    if (g2 > 0.0) kn += (0.67 - abs(2.0 * vnoise(xz * 2.9 + 67.0) - 1.0)) * 0.09 * g2;
+    r += kn * outc;
+  }
+  return r;
 }
 float expInt(float h0, float dy, float d, float H) {      // integral of exp(-h/H) along a straight ray of length d
   float x = dy * d / H;
@@ -435,6 +468,7 @@ float cloudField(vec2 xz) {
   return smoothstep(1.0 - fogP.z * 1.35 - 0.06, 1.0 - fogP.z * 1.35 + 0.2, n);
 }
 const bool CLOUDS = ${!QS.has('noclouds')};      // &noclouds: compiled out (A/B timing)
+const bool MICRO = ${!QS.has('nomicro')};        // &nomicro: no scree stones or rock knobs in the micro-relief (A/B)
 uniform vec4 cloudT[10];      // the cumulus towers over the summits: centre x, z (drifting), radius, shadow strength
 float cloudShade(vec3 p) {
   float t = (CLOUD_Y - p.y) / max(sunDir.y, 0.06);
@@ -988,9 +1022,10 @@ void main() {
     const vd = new BABYLON.VertexData(); vd.positions = pos; vd.indices = idx; vd.applyToMesh(grid);
   }
   grid.alwaysSelectAsActiveMesh = true; grid.isPickable = false; grid.doNotSyncBoundingInfo = true;
-  const LEAF = 32, ROOT = LVL[FAR_I].extent, ROOT_X = LVL[FAR_I].cx - ROOT / 2, ROOT_Z = LVL[FAR_I].cz - ROOT / 2, NLOD = Math.round(Math.log2(ROOT / LEAF)) + 1;     // 32 m leaves: 1 m cells near the camera
+  // 16 m leaves (0.5 m cells within ~60 m of the camera, 2026-10-19) carry the micro-relief and the fine rock bands; &leaf=32: 1 m cells
+  const LEAF = +(QS.get('leaf') || Q.leaf || 32), ROOT = LVL[FAR_I].extent, ROOT_X = LVL[FAR_I].cx - ROOT / 2, ROOT_Z = LVL[FAR_I].cz - ROOT / 2, NLOD = Math.round(Math.log2(ROOT / LEAF)) + 1;     // 32 m leaves: 1 m cells near the camera
   const RANGE0 = +(QS.get('lodr') || Q.lodR);
-  const ranges = []; for (let i = 0; i < NLOD; i++) ranges.push(RANGE0 * Math.pow(2, i - 1));     // RANGE0 stays the reach of 2 m cells
+  const ranges = []; for (let i = 0; i < NLOD; i++) ranges.push(RANGE0 * LEAF / GRID * Math.pow(2, i) / 2);     // RANGE0 stays the reach of 2 m cells
   const morphK = []; for (let i = 0; i < NLOD; i++) { const end = ranges[i], start = end * 0.72; morphK.push(start, 1 / (end - start), 0, 0); }
   // rock LOD bias (2026-10-17): a heightfield wall gets few vertices for its height (a 4 m cell on an 80 degree wall spans 23 m
   // of rock), so steep rock is selected and morphed as if ROCK_B times closer. The bias comes from a 32 m grid of steepness over
@@ -1098,6 +1133,8 @@ void main() {
   float dCam = distance(wp, camPos.xz);
   int sl = slopeL(wp); vec4 nd = textureLod(nArr, vec3(lvUV(sl, wp), float(sl)), 0.0);     // 16 m slope: big walls only, never small road banks
   levelSetup(wp); float roadD = detailB(wp).r * 25.5;
+  // the mesh cell at this point, from the biased distance (a smooth function of position: neighbouring nodes agree, no cracks)
+  float cell = max(${(LEAF / GRID).toFixed(2)}, 2.5 * dCam / rockB(wp) / ${(RANGE0).toFixed(1)});
   vec2 nxz = nd.rg * 2.0 - 1.0; float slope = 1.0 - sqrt(max(0.0, 1.0 - dot(nxz, nxz)));
   float rockW = ${QS.has('nocarve') ? '0.0 *' : ''} smoothstep(0.36, 0.58, slope) * (1.0 - smoothstep(2500.0, 4500.0, dCam));
   // not on road cuts and banks: only walls well away from the road, and fully only on big walls (low sky visibility = deep in rock)
@@ -1109,9 +1146,7 @@ void main() {
     float r1 = 1.0 - abs(2.0 * vnoise(vec2(along / 24.0, alt / 110.0)) - 1.0);
     float r2 = 1.0 - abs(2.0 * vnoise(vec2(along / 9.0 + 3.1, alt / 38.0)) - 1.0);
     float blocky = floor(vnoise(vec2(along / 14.0 + 7.0, alt / 90.0)) * 3.0) / 3.0;     // blocks are tall: steps run up the wall, not across it
-    // detail the mesh can carry: each band only where cells are well below its wavelength (else it aliases into spikes). The cell
-    // size is estimated from the biased distance, a smooth function of position, so neighbouring nodes carve the same (no cracks)
-    float cell = max(1.0, 2.5 * dCam / rockB(wp) / ${(RANGE0).toFixed(1)});
+    // detail the mesh can carry: each band only where cells are well below its wavelength (else it aliases into spikes)
     float k1 = 1.0 - smoothstep(3.0, 6.0, cell), k2 = 1.0 - smoothstep(1.0, 2.5, cell), k3 = 1.0 - smoothstep(1.0, 1.7, cell);
     // fine rock: vertical flutes and cracks (joints run up the wall), and bedding ledges every ~14 m of real height, where
     // the face creeps out up each bed and steps back at its top
@@ -1123,7 +1158,11 @@ void main() {
   }
   float mfade = 1.0 - smoothstep(90.0, 140.0, dCam);
   if (mfade > 0.0) mfade *= smoothstep(5.8, 8.6, roadD) * fineW(wp);
-  if (mfade > 0.0) h += microH(wp, h * INV_S + atm.y, slope) * mfade;
+  if (mfade > 0.0) {
+    vec2 nf = nrmData(wp).rg * 2.0 - 1.0; float slopeF = 1.0 - sqrt(max(0.0, 1.0 - dot(nf, nf))), altR = h * INV_S + atm.y - patchOffset(wp);
+    vec2 mc = MICRO ? microClass(altR, slopeF, detailA(wp)) : vec2(0.0);
+    h += microH(wp, altR, slopeF, mc.x, mc.y, cell) * mfade;
+  }
   vPos = vec3(wp.x, h, wp.y);
   gl_Position = viewProjection * vec4(vPos - floatO, 1.0);
 }`;
@@ -1174,10 +1213,14 @@ void main() {
   float mfade = 1.0 - smoothstep(90.0, 140.0, dist);
   if (mfade > 0.0) mfade *= smoothstep(5.8, 8.6, dB.r * 25.5) * fw;
   if (mfade > 0.0) {
-    float e = 0.35, a0 = alt - microH(xz, alt, slope);
-    float gx = microH(xz + vec2(e, 0.0), a0, slope) - microH(xz - vec2(e, 0.0), a0, slope);
-    float gz = microH(xz + vec2(0.0, e), a0, slope) - microH(xz - vec2(0.0, e), a0, slope);
-    N = normalize(N + vec3(-gx, 0.0, -gz) / (2.0 * e) * mfade);
+    // forward differences (3 evaluations; screen-space derivatives were cheaper but shaded in 2 x 2 pixel steps). The bands shade
+    // down to twice the pixel footprint, finer than the mesh carries them.
+    vec2 mc = MICRO ? microClass(alt, slope, dA) : vec2(0.0);
+    float cellF = 2.0 * max(length(dFdx(vPos)), length(dFdy(vPos))), sc = mc.x, oc = mc.y;
+    float e = 0.2, a0 = alt - microH(xz, alt, slope, sc, oc, cellF), h0 = microH(xz, a0, slope, sc, oc, cellF);
+    float gx = microH(xz + vec2(e, 0.0), a0, slope, sc, oc, cellF) - h0;
+    float gz = microH(xz + vec2(0.0, e), a0, slope, sc, oc, cellF) - h0;
+    N = normalize(N + vec3(-gx, 0.0, -gz) / e * mfade);
   }
   // faceted rock: on walls shade with the carved geometry itself (flat per triangle, which reads as angular rock)
   vec3 Ng = normalize(cross(dFdx(vPos), dFdy(vPos))); if (dot(Ng, camPos - vPos) < 0.0) Ng = -Ng;
@@ -1381,7 +1424,7 @@ void main() {
   // Keep luminance and the approved alpine palette; fade the correction across patches.
   col = mix(col, vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), nonDol * 0.28);
   gl_FragColor = vec4(col, 1.0);
-  ${DBG === 1 ? 'gl_FragColor = vec4(N * 0.5 + 0.5, 1.0);' : DBG === 2 ? 'gl_FragColor = vec4(fract(alt / 100.0), fract(alt / 1000.0), vis, 1.0);' : DBG === 3 ? 'gl_FragColor = vec4(alb, 1.0);' : DBG === 4 ? 'gl_FragColor = vec4(vec3(sh), 1.0);' : DBG === 5 ? 'gl_FragColor = vec4(dA.rgb, 1.0);' : DBG === 6 ? 'gl_FragColor = vec4(dB.r, dB.g, dB.a, 1.0);' : DBG === 7 ? 'gl_FragColor = vec4(fract(float(baseLevel(xz)) / 6.0 + 0.01), fw, dA.a, 1.0);' : DBG === 8 ? 'gl_FragColor = vec4(texture(aArr, vec3(lvUV(0, xz), 0.0)).rgb, 1.0);' : DBG === 9 ? 'gl_FragColor = vec4(texture(nArr, vec3(lvUV(0, xz), 0.0)).rgb, 1.0);' : DBG === 10 ? 'gl_FragColor = vec4(lvUV(0, xz), 0.0, 1.0);' : DBG === 11 ? 'gl_FragColor = vec4(w[0], w[1], w[2] + w[3], 1.0);' : DBG === 12 ? 'gl_FragColor = vec4(albL[2], 1.0);' : DBG === 13 ? 'gl_FragColor = vec4(vec3(tfade), 1.0);' : DBG === 14 ? 'gl_FragColor = vec4(albDbg1, 1.0);' : DBG === 15 ? 'gl_FragColor = vec4(albDbg2, 1.0);' : DBG === 16 ? 'gl_FragColor = vec4(dB.g, dB.b, dB.a, 1.0);' : DBG === 17 ? 'gl_FragColor = vec4(step(0.5, shore), step(0.5, vine) + step(0.5, orch) * 0.5, step(0.5, urb), 1.0);' : DBG === 19 ? 'gl_FragColor = vec4(vPos.y < -400.0 ? 1.0 : 0.0, 0.0, 0.0, 1.0);' : DBG === 20 ? 'gl_FragColor = vec4(0.0, (waterY + 2.5 - vPos.y) > 0.0 ? 1.0 : 0.0, 0.0, 1.0);' : DBG === 18 ? 'gl_FragColor = vec4(step(waterY + 2.5, vPos.y), step(0.0, waterY + 600.0), step(0.0, vPos.y), 1.0);' : DBG === 21 ? 'gl_FragColor = vec4(vec3(clamp(dA.a * 63.75 / 20.0, 0.0, 1.0)), 1.0);' : DBG === 22 ? 'gl_FragColor = vec4(rk, forestC, w[3], 1.0);' : ''}
+  ${DBG === 1 ? 'gl_FragColor = vec4(N * 0.5 + 0.5, 1.0);' : DBG === 2 ? 'gl_FragColor = vec4(fract(alt / 100.0), fract(alt / 1000.0), vis, 1.0);' : DBG === 3 ? 'gl_FragColor = vec4(alb, 1.0);' : DBG === 4 ? 'gl_FragColor = vec4(vec3(sh), 1.0);' : DBG === 5 ? 'gl_FragColor = vec4(dA.rgb, 1.0);' : DBG === 6 ? 'gl_FragColor = vec4(dB.r, dB.g, dB.a, 1.0);' : DBG === 7 ? 'gl_FragColor = vec4(fract(float(baseLevel(xz)) / 6.0 + 0.01), fw, dA.a, 1.0);' : DBG === 8 ? 'gl_FragColor = vec4(texture(aArr, vec3(lvUV(0, xz), 0.0)).rgb, 1.0);' : DBG === 9 ? 'gl_FragColor = vec4(texture(nArr, vec3(lvUV(0, xz), 0.0)).rgb, 1.0);' : DBG === 10 ? 'gl_FragColor = vec4(lvUV(0, xz), 0.0, 1.0);' : DBG === 11 ? 'gl_FragColor = vec4(w[0], w[1], w[2] + w[3], 1.0);' : DBG === 12 ? 'gl_FragColor = vec4(albL[2], 1.0);' : DBG === 13 ? 'gl_FragColor = vec4(vec3(tfade), 1.0);' : DBG === 14 ? 'gl_FragColor = vec4(albDbg1, 1.0);' : DBG === 15 ? 'gl_FragColor = vec4(albDbg2, 1.0);' : DBG === 16 ? 'gl_FragColor = vec4(dB.g, dB.b, dB.a, 1.0);' : DBG === 17 ? 'gl_FragColor = vec4(step(0.5, shore), step(0.5, vine) + step(0.5, orch) * 0.5, step(0.5, urb), 1.0);' : DBG === 19 ? 'gl_FragColor = vec4(vPos.y < -400.0 ? 1.0 : 0.0, 0.0, 0.0, 1.0);' : DBG === 20 ? 'gl_FragColor = vec4(0.0, (waterY + 2.5 - vPos.y) > 0.0 ? 1.0 : 0.0, 0.0, 1.0);' : DBG === 18 ? 'gl_FragColor = vec4(step(waterY + 2.5, vPos.y), step(0.0, waterY + 600.0), step(0.0, vPos.y), 1.0);' : DBG === 21 ? 'gl_FragColor = vec4(vec3(clamp(dA.a * 63.75 / 20.0, 0.0, 1.0)), 1.0);' : DBG === 22 ? 'gl_FragColor = vec4(rk, forestC, w[3], 1.0);' : DBG === 23 ? 'gl_FragColor = vec4(vec3(0.5 + 1.5 * microH(xz, alt, slope, microClass(alt, slope, dA).x, microClass(alt, slope, dA).y, 0.0)) * vec3(1.0, 0.6 + 0.4 * microClass(alt, slope, dA).x, 0.6 + 0.4 * microClass(alt, slope, dA).y), 1.0);' : ''}
 }`;
   const terrainMat = new BABYLON.ShaderMaterial('terrainMat', scene, { vertex: 'terrain', fragment: 'terrain' }, {
     attributes: ['position'],
@@ -3298,7 +3341,13 @@ void main() {
 attribute vec3 position; attribute vec3 normal; attribute vec2 uv; attribute vec2 uv2;
 uniform mat4 viewProjection;
 varying vec3 vPos; varying vec3 vN; varying vec2 vUV; varying vec2 vU2;
-void main() { vPos = position; vN = normal; vUV = uv; vU2 = uv2; gl_Position = viewProjection * vec4(position - floatO, 1.0); }`;
+void main() {
+  vPos = position; vN = normal; vUV = uv; vU2 = uv2;
+  // these overlays sit on the CPU ground, which has no micro-relief: drawn pulled towards the camera by the relief's height
+  // (no depth write, so whatever is really in front still covers them), else stones and knobs poke through them
+  vec3 toCam = camPos - position; float d = length(toCam);
+  gl_Position = viewProjection * vec4(position + toCam / max(d, 1.0) * 0.8 * (1.0 - smoothstep(90.0, 140.0, d)) - floatO, 1.0);
+}`;
     BABYLON.Effect.ShadersStore.mownFragmentShader = GL_COMMON + GL_LEVELS + GL_SHADOWED + `
 uniform highp sampler2DArray texAlb; uniform vec3 grassGain;
 // vUV: across-the-slope coordinate (m) and distance to the field's edge (m), vU2: field hash and drying rows (1)
