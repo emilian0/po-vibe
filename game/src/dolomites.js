@@ -517,11 +517,29 @@ float carAO(vec3 p) {
   // ---------- terrain textures: every level packed into texture arrays ----------
   // one image at a time, and the bitmap and canvas freed at once: decoding all ~26 maps in parallel (bitmap + 2048² canvas +
   // pixel copy each) made a ~1.9 GB peak while loading, enough to crash phone tabs (2026-10-19)
+  // decode with createImageBitmap; on failure (a phone reported 'Cannot decode the data', 2026-10-19) download again past the cache,
+  // then fall back to an <img> decode. Errors and breadcrumbs name the file, its size and type.
+  const decodeImg = async (p, opts) => {
+    let lastErr = null, info = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(assetUrl(p), attempt ? { cache: 'reload' } : undefined);
+      const blob = await res.blob(); info = `${p} (${res.status}, ${Math.round(blob.size / 1024)} KB, ${blob.type || 'no type'})`;
+      try { return await createImageBitmap(blob, opts); } catch (e) { lastErr = e; CRUMB.set('decode failed ' + (attempt + 1) + ': ' + info); }
+      if (attempt) {
+        const url = URL.createObjectURL(blob);
+        try { const im = new Image(); im.src = url; await im.decode(); return im; }
+        catch (e) { lastErr = e; CRUMB.set('img decode failed: ' + info); }
+        finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+      }
+    }
+    throw new Error('could not decode ' + info + ': ' + ((lastErr && lastErr.message) || lastErr));
+  };
   const imgBytes = async (p) => {
-    const bmp = await createImageBitmap(await (await fetch(assetUrl(p))).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
-    const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
-    const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0); const d = cx.getImageData(0, 0, bmp.width, bmp.height).data;
-    bmp.close(); cv.width = cv.height = 0; return d;
+    const bmp = await decodeImg(p, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0); const d = cx.getImageData(0, 0, w, h).data;
+    if (bmp.close) bmp.close(); cv.width = cv.height = 0; return d;
   };
   // GPU arrays are built in a block so the staging copies (300+ MB) are freed after upload (the engine keeps no copies either)
   let hArr, nArr, aArr, bArr;
@@ -566,11 +584,11 @@ float carAO(vec3 p) {
   // ---------- detail texture arrays (CC0 scans, packed by tools/terrain/pack_textures.py) ----------
   const TEX_INFO = await getJSON('textures/terrain/terrain_layers.json');
   const loadStrip = async (p) => {
-    const blob = await (await fetch(assetUrl(p))).blob();
-    const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
-    const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+    const bmp = await decodeImg(p, { colorSpaceConversion: 'none' });
+    const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
     const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0);
-    const d = new Uint8Array(cx.getImageData(0, 0, bmp.width, bmp.height).data.buffer); bmp.close(); cv.width = cv.height = 0; return d;
+    const d = new Uint8Array(cx.getImageData(0, 0, w, h).data.buffer); if (bmp.close) bmp.close(); cv.width = cv.height = 0; return d;
   };
   const texArr = {};
   {
