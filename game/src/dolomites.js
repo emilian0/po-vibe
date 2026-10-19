@@ -15,6 +15,31 @@
         live.push({ r: new WeakRef(this.buffer), where: st.replace(/^\s*at\s*/, '').replace(/https?:\/\/[^/]+\//, '').replace(/\?v=\d+/, '').slice(0, 90) }); } } };
       Object.defineProperty(Traced, 'name', { value: name }); window[name] = Traced;
     }
+    // GPU memory as WebGL is asked for it: textures (all levels), renderbuffers (x samples) and buffers, minus deletes
+    { const G = WebGL2RenderingContext.prototype, sizes = new Map(), bound = {}; let unit = 0;
+      const BPP = { 0x8058: 4, 0x8C43: 4, 0x881A: 8, 0x8814: 16, 0x8234: 2, 0x8229: 1, 0x822B: 2, 0x822F: 4, 0x8230: 8, 0x822E: 4, 0x822D: 2, 0x8C3A: 4, 0x8051: 4, 0x88F0: 4, 0x81A6: 4, 0x8CAC: 4, 0x81A5: 2, 0x8D48: 1, 0x8236: 4, 0x8232: 1 };
+      const typeB = (fmt, type) => (fmt === 0x1903 || fmt === 0x8D94 ? 1 : fmt === 0x8227 ? 2 : fmt === 0x1907 ? 3 : 4) * (type === 0x1406 ? 4 : type === 0x140B || type === 0x8D61 || type === 0x1403 ? 2 : 1);
+      let lastDesc = ''; const add = (obj, key, bytes) => { if (!obj) return; let m = sizes.get(obj); if (!m) sizes.set(obj, m = {}); m[key] = bytes; if (key === 'all' || key.startsWith('l0')) (descs.get(obj) || descs.set(obj, []).get(obj)).push(lastDesc); };
+      const descs = new Map();
+      const cur = (target) => bound[unit + ':' + target];
+      const wrap = (name, f) => { const o = G[name]; G[name] = function (...a) { try { f.apply(this, a); } catch (_) {} return o.apply(this, a); }; };
+      wrap('activeTexture', (u) => { unit = u; });
+      wrap('bindTexture', (target, tex) => { bound[unit + ':' + target] = tex; });
+      wrap('bindRenderbuffer', (target, rb) => { bound['rb'] = rb; });
+      wrap('bindBuffer', (target, b) => { bound['b' + target] = b; });
+      wrap('texStorage2D', (target, levels, fmt, w, h) => { lastDesc = 'S2D ' + w + 'x' + h + ' f' + fmt.toString(16) + ' L' + levels; let s = 0; for (let l = 0; l < levels; l++) s += Math.max(1, w >> l) * Math.max(1, h >> l) * (BPP[fmt] || 4); add(cur(target === 0x8513 ? 0x8513 : target), 'all', s * (target === 0x8513 ? 6 : 1)); });
+      wrap('texStorage3D', (target, levels, fmt, w, h, d) => { lastDesc = 'S3D ' + w + 'x' + h + 'x' + d + ' f' + fmt.toString(16) + ' L' + levels; const comp = !BPP[fmt]; let s = 0; for (let l = 0; l < levels; l++) s += Math.max(1, w >> l) * Math.max(1, h >> l) * (comp ? 1 : BPP[fmt]); add(cur(target), 'all', s * d); });
+      wrap('texImage2D', function (target, level, fmt, w, h, border, format, type) { if (arguments.length === 6) { const src = arguments[5]; lastDesc = 'T2D img ' + (src && (src.width || src.videoWidth)) + 'x' + (src && (src.height || src.videoHeight)) + ' f' + (+fmt).toString(16); add(cur(target >= 0x8515 && target <= 0x851A ? 0x8513 : target), 'l' + level + ':' + target, (src.width || src.videoWidth || 0) * (src.height || src.videoHeight || 0) * 4); return; } lastDesc = 'T2D ' + w + 'x' + h + ' f' + (+fmt).toString(16) + ' t' + (type || 0).toString(16); add(cur(target >= 0x8515 && target <= 0x851A ? 0x8513 : target), 'l' + level + ':' + target, w * h * (BPP[fmt] || typeB(format, type))); });
+      wrap('texImage3D', (target, level, fmt, w, h, d, border, format, type) => (lastDesc = 'T3D ' + w + 'x' + h + 'x' + d + ' f' + fmt.toString(16)) && add(cur(target), 'l' + level, w * h * d * (BPP[fmt] || typeB(format, type))));
+      wrap('compressedTexImage2D', (target, level, fmt, w, h, border, data) => add(cur(target), 'l' + level + ':' + target, data ? data.byteLength : w * h));
+      wrap('renderbufferStorage', (target, fmt, w, h) => add(bound['rb'], 'all', w * h * (BPP[fmt] || 4)));
+      wrap('renderbufferStorageMultisample', (target, samples, fmt, w, h) => add(bound['rb'], 'all', w * h * (BPP[fmt] || 4) * Math.max(1, samples)));
+      wrap('bufferData', (target, data) => add(bound['b' + target], 'all', typeof data === 'number' ? data : data ? data.byteLength : 0));
+      for (const n of ['deleteTexture', 'deleteRenderbuffer', 'deleteBuffer']) wrap(n, (obj) => sizes.delete(obj));
+      window.__gpuMem = () => { const tot = { tex: 0, rb: 0, buf: 0 }; for (const [obj, m] of sizes) { const s = Object.values(m).reduce((a, b) => a + b, 0); const k = obj instanceof WebGLTexture ? 'tex' : obj instanceof WebGLRenderbuffer ? 'rb' : 'buf'; tot[k] += s; }
+        const top = [...sizes].map(([o, m]) => [Object.values(m).reduce((a, b) => a + b, 0), o, m]).sort((a, b) => b[0] - a[0]).slice(0, 14).map(([s, o, m]) => Math.round(s / 1e6) + ' MB ' + (o instanceof WebGLTexture ? 'tex ' : o instanceof WebGLRenderbuffer ? 'rb ' : 'buf ') + Object.keys(m).length + 'x ' + ((descs.get(o) || [])[0] || ''));
+        return { top, texMB: Math.round(tot.tex / 1e6), renderbufMB: Math.round(tot.rb / 1e6), bufferMB: Math.round(tot.buf / 1e6), totalMB: Math.round((tot.tex + tot.rb + tot.buf) / 1e6) }; };
+    }
     window.__memPeak = { mb: 0, at: '' }; const st0 = document.getElementById('status');
     const bySite = () => { const seen = new Set(), by = {}; for (const e of live) { const b = e.r.deref(); if (!b || seen.has(b)) continue; seen.add(b); by[e.where] = (by[e.where] || 0) + b.byteLength; }
       return Object.entries(by).sort((x, y) => y[1] - x[1]).slice(0, 12).map(([w, v]) => Math.round(v / 1e6) + ' MB  ' + w); };
@@ -230,7 +255,8 @@ bool inTunnelMouth(vec3 p) {
   const benchMs = await benchGPU();
   let tierName = QS.get('quality');
   if (!TIERS[tierName]) tierName = isMobile ? (benchMs < 4 ? 'medium' : 'low') : benchMs < 1.0 ? 'ultra' : benchMs < 2.2 ? 'high' : benchMs < 7 ? 'medium' : 'low';     // AMD Radeon Pro 5500M ~3 ms -> medium
-  const Q = TIERS[tierName];
+  const Q = Object.assign({}, TIERS[tierName]);
+  for (const [k, v] of QS) if (k.startsWith('q.') && k.slice(2) in Q && !Array.isArray(Q[k.slice(2)])) Q[k.slice(2)] = +v;      // test overrides, e.g. &q.msaa=1
   const SAFE = { on: false };     // set by the frame watchdog: drops the expensive passes after very long frames
   console.log('GPU benchmark', benchMs.toFixed(2), 'ms ->', tierName);
   let renderScale = +(QS.get('scale') || Q.scale[2]);
