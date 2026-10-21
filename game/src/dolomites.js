@@ -4042,6 +4042,7 @@ void main() {
   const keys = {}, touchKeys = {}, touchAxis = { steer: 0, pedal: 0 };      // touch sticks: steer -1..1 (right +), pedal -1..1 (gas +)
   const touchDriving = isTouch || navigator.maxTouchPoints > 0 || QS.has('touch');
   let driving = false, chassis = null, vehicle = null, steer = 0, camMode = 0, physWorld = null;
+  const chase = { heading: null, height: null, clearance: null, reset: true };
   const wheels = []; let C0Y = 0.6;
   const fwdV = new CANNON.Vec3();
   const HF_N = 160, HF_TS = 2, hf = { body: null, cx: 1e9, cz: 1e9 };
@@ -4072,6 +4073,7 @@ void main() {
     chassis.position.set(x, collisionH(x, z) + C0Y + 0.1, z);
     chassis.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.atan2(dx, dz));
     chassis.velocity.set(0, 0, 0); chassis.angularVelocity.set(0, 0, 0);
+    chase.reset = true;
   };
   if (DRIVE) {
     physWorld = new CANNON.World(); physWorld.gravity.set(0, -9.81, 0); physWorld.broadphase = new CANNON.SAPBroadphase(physWorld); physWorld.solver.iterations = 10;
@@ -4101,7 +4103,7 @@ void main() {
     mark('spawn'); spawnAt(startI); mark('spawned');
     driving = true;
     const resetCar = () => spawnAt(roadIndexNear(chassis.position.x, chassis.position.z));
-    const cycleCamera = () => { camMode = (camMode + 1) % 3; if (camMode === 2) camera.attachControl(canvas, true); else camera.detachControl(); };
+    const cycleCamera = () => { camMode = (camMode + 1) % 3; chase.reset = true; if (camMode === 2) camera.attachControl(canvas, true); else camera.detachControl(); };
     if (touchDriving) {
       document.body.classList.add('corridor-touch');
       const pad = document.createElement('div'); pad.id = 'driveTouch';
@@ -4234,9 +4236,21 @@ void main() {
     const cp = new V3(chassis.position.x, chassis.position.y, chassis.position.z), fw = new V3(fwdV.x, 0, fwdV.z).normalize();
     if (camMode < 2) {
       const dist = camMode === 0 ? 6.4 : 12, hgt = camMode === 0 ? 2.1 : 3.8;
-      const want = cp.add(fw.scale(-dist)).add(new V3(0, hgt, 0)); want.y = Math.max(want.y, collisionH(want.x, want.z) + 0.8); { const st = structAt(cp.x, cp.z); if (st && st[4] === 1) want.y = Math.min(want.y, st[1] + 4.6); }     // inside a tunnel the camera stays under the vault
-      const k = V3.Distance(camera.position, want) > 25 ? 1 : 1 - Math.exp(-dt * 6); camera.position = V3.Lerp(camera.position, want, k);
-      camera.setTarget(cp.add(fw.scale(3)).add(new V3(0, 0.6, 0))); camera.fov = 0.9 + Math.min(0.2, kmh / 650);
+      // Follow at a fixed horizontal distance: lagging the camera's position changes the apparent size of the car.
+      // Smooth only the heading and height, with a fast rise and slower fall for ground clearance.
+      const reset = chase.reset || !chase.heading || chase.height === null;
+      chase.heading = reset ? fw.clone() : V3.Lerp(chase.heading, fw, 1 - Math.exp(-dt * 9)).normalize();
+      chase.height = reset ? cp.y : chase.height + (cp.y - chase.height) * (1 - Math.exp(-dt * 12));
+      const want = cp.add(chase.heading.scale(-dist));
+      const baseY = chase.height + hgt, floorY = collisionH(want.x, want.z) + 0.8;
+      const lift = Math.max(0, floorY - baseY);
+      chase.clearance = reset ? lift : chase.clearance + (lift - chase.clearance) * (1 - Math.exp(-dt * (lift > chase.clearance ? 24 : 5)));
+      want.y = baseY + Math.max(lift, chase.clearance);
+      { const st = structAt(cp.x, cp.z); if (st && st[4] === 1) want.y = Math.min(want.y, st[1] + 4.6); }     // inside a tunnel the camera stays under the vault
+      camera.position.copyFrom(want);
+      camera.setTarget(new V3(cp.x + chase.heading.x * 3, chase.height + 0.6, cp.z + chase.heading.z * 3));
+      camera.fov = 0.9;
+      chase.reset = false;
     }
     shadeT += dt; if (shadeT > 0.15) { shadeT = 0; const st = structAt(cp.x, cp.z); carShade = st && st[4] === 1 ? 0.04 : shadeAt(cp.x, cp.y + 0.8, cp.z); }     // under a tunnel vault: no sun on the car
     if (modeChip) modeChip.textContent = Math.round(kmh) + (touchDriving ? ' km/h' : ' km/h · WASD drive · Space handbrake · C camera · R reset · G look panel');
