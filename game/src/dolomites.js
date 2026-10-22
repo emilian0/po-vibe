@@ -4207,16 +4207,22 @@ void main() {
         clearTimeout(hint.hideTimer);
         hint.hideTimer = setTimeout(() => { hint.hidden = true; }, 7000);
       });
-      // Safari's browser bars can make its visual viewport shorter than the layout viewport.
-      // Size and position the controls to the actually visible rectangle after every toolbar/rotation change.
+      // A transient zero visualViewport.width would collapse both joysticks at the left. Split the layout width explicitly;
+      // use only a valid visual viewport height for browser-bar changes.
+      const steerZone = pad.querySelector('[data-stick="steer"]');
+      const pedalZone = pad.querySelector('[data-stick="pedal"]');
       const layoutTouch = () => {
         const v = window.visualViewport;
-        pad.style.left = `${v ? v.offsetLeft : 0}px`;
-        pad.style.top = `${v ? v.offsetTop : 0}px`;
-        pad.style.width = `${v ? v.width : innerWidth}px`;
-        pad.style.height = `${v ? v.height : innerHeight}px`;
+        const width = document.documentElement.clientWidth || innerWidth || screen.width || 1;
+        const half = Math.floor(width / 2);
+        const height = v && v.height >= 240 ? v.height : innerHeight;
+        pad.style.left = '0px'; pad.style.top = `${v && Number.isFinite(v.offsetTop) ? v.offsetTop : 0}px`;
+        pad.style.width = `${width}px`; pad.style.height = `${height}px`;
+        steerZone.style.left = '0px'; steerZone.style.width = `${half}px`;
+        pedalZone.style.left = `${half}px`; pedalZone.style.right = 'auto'; pedalZone.style.width = `${width - half}px`;
       };
       layoutTouch();
+      requestAnimationFrame(layoutTouch);
       window.addEventListener('resize', layoutTouch);
       window.addEventListener('orientationchange', layoutTouch);
       if (window.visualViewport) {
