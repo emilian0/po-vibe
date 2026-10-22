@@ -18,7 +18,8 @@ Data sources and required attributions: [DATA_SOURCES.md](DATA_SOURCES.md)
 
 Run python3 -m http.server 8141 here, then visit http://localhost:8141/.
 WASD/arrows drive, Space handbrake, C camera, R reset, G look panel.
-On touch screens: left/right steering, gas, brake/reverse, handbrake, camera and reset.
+On touch screens: drag the fixed left steering pad and hold the gas or brake/reverse pedal on the right.
+Camera and reset are above the drive area. Your location is saved on this device; the next visit offers Continue or Start at the beginning.
 Landscape is recommended. Add &touch to the game URL to preview touch controls on desktop.
 
 ## Current limits

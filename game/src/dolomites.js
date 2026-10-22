@@ -277,7 +277,9 @@ bool inTunnelMouth(vec3 p) {
   // phone tuning: the resolution may climb to 2 device px per CSS px, which sharpens a phone screen more than MSAA would. 4x MSAA was
   // off on phones while memory was tight (the phone crashed with it at ~930 MB); with the streamed world (~300 MB at phone size,
   // 2026-10-19) it is back on: smooth edges on trees, roofs and the road, and alpha-to-coverage foliage. &q.msaa=1 turns it off.
-  if (isMobile && tierName === 'medium') { Q.scale = [0.6, DPR, 1.0]; }
+  // Start above CSS resolution and keep the adaptive floor at 1x. The old 0.6x floor enlarged each rendered pixel
+  // across several display pixels on Retina phones. The frame-time controller still reduces resolution before dropping FPS.
+  if (isMobile && tierName === 'medium') { Q.scale = [1.0, DPR, Math.min(DPR, 1.25)]; }
   for (const [k, v] of QS) if (k.startsWith('q.') && k.slice(2) in Q && !Array.isArray(Q[k.slice(2)])) Q[k.slice(2)] = +v;      // test overrides, e.g. &q.msaa=1
   const SAFE = { on: false };     // set by the frame watchdog: drops the expensive passes after very long frames
   console.log('GPU benchmark', benchMs.toFixed(2), 'ms ->', tierName);
@@ -3178,10 +3180,11 @@ void main() {
     let sT = 0;
     scene.onBeforeRenderObservable.add(() => { const now = performance.now(); if (now - sT < 300) return; sT = now; const p = scene.activeCamera.position;
       for (const c of scells) { const on = Math.hypot(c.cx - p.x, c.cz - p.z) < 1500; if (c.m.isEnabled() !== on) c.m.setEnabled(on); } });
-    // spray over the white water (the user's request): droplets thrown up where a stream falls, drawn only within ~60 m of the car.
+    // The billboard spray looked like floating particles on steep streams. Keep it as an opt-in look test (&spray),
+    // while the flowing surface and foam remain in the default scene.
     // Each droplet is a billboard animated in the vertex shader from its emitter and a seed (launch, arc, fall, fade); the CPU only
     // refreshes the emitter list twice a second. An ordinary ShaderMaterial, so the load-time warm-up builds its pipeline.
-    if (!QS.has('nospray')) {
+    if (QS.has('spray') && !QS.has('nospray')) {
       const EM = [];      // [x, y, z, strength, flow dir x, flow dir z]
       for (const s of STREAMS.streams) { const P = s.points;
         for (let i = 2; i < P.length - 2; i += 2) { const a = P[i - 2], b = P[i + 2], l = Math.hypot(b[0] - a[0], b[2] - a[2]) || 1, sl = (a[1] - b[1]) / l;
@@ -4039,7 +4042,7 @@ void main() {
 
   // ---------- driving: cannon RaycastVehicle (same tuning as the Po map) on a heightfield window that follows the car ----------
   const DRIVE = !QS.has('shot') && car && typeof CANNON !== 'undefined';
-  const keys = {}, touchKeys = {}, touchAxis = { steer: 0, pedal: 0 };      // touch sticks: steer -1..1 (right +), pedal -1..1 (gas +)
+  const keys = {}, touchKeys = {}, touchAxis = { steer: 0 };      // fixed steering pad; gas and brake are independent hold buttons
   const touchDriving = isTouch || navigator.maxTouchPoints > 0 || QS.has('touch');
   let driving = false, chassis = null, vehicle = null, steer = 0, camMode = 0, physWorld = null;
   const chase = { heading: null, height: null, clearance: null, reset: true };
@@ -4075,6 +4078,10 @@ void main() {
     chassis.velocity.set(0, 0, 0); chassis.angularVelocity.set(0, 0, 0);
     chase.reset = true;
   };
+  const SAVE_KEY = 'po-dolomites-position-v1';
+  const routeStamp = [ROUTE_PTS.length, Math.round(ROUTE_S.at(-1)), Math.round(ROUTE_PTS[0][0]), Math.round(ROUTE_PTS[0][2])].join(':');
+  const normalDrive = !['shot', 'diag', 'autodrive', 'at', 'road', 'touch'].some(k => QS.has(k));
+  let resumePrompt = null;
   if (DRIVE) {
     physWorld = new CANNON.World(); physWorld.gravity.set(0, -9.81, 0); physWorld.broadphase = new CANNON.SAPBroadphase(physWorld); physWorld.solver.iterations = 10;
     physWorld.defaultContactMaterial.friction = 0.3;
@@ -4102,37 +4109,69 @@ void main() {
     }
     mark('spawn'); spawnAt(startI); mark('spawned');
     driving = true;
+    if (normalDrive) {
+      const savePosition = () => {
+        if (resumePrompt || !driving || !chassis) return;
+        const c = chassis.position, i = roadIndexNear(c.x, c.z), rp = ROUTE_PTS[i];
+        if (Math.hypot(c.x - rp[0], c.z - rp[2]) > 100 || Math.abs(c.y - collisionH(c.x, c.z)) > 8) return;
+        const q = chassis.quaternion;
+        try { localStorage.setItem(SAVE_KEY, JSON.stringify({ stamp: routeStamp, i, p: [c.x, c.y, c.z], q: [q.x, q.y, q.z, q.w] })); } catch (_) { /* private browsing may block storage */ }
+      };
+      window.addEventListener('pagehide', savePosition);
+      document.addEventListener('visibilitychange', () => { if (document.hidden) savePosition(); });
+      setInterval(savePosition, 5000);       // Safari may suspend a tab without pagehide
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (_) { /* ignore damaged storage */ }
+      const valid = saved && saved.stamp === routeStamp && Number.isInteger(saved.i) && saved.i >= 0 && saved.i < ROUTE_PTS.length &&
+        Array.isArray(saved.p) && saved.p.length === 3 && saved.p.every(Number.isFinite) && Array.isArray(saved.q) && saved.q.length === 4 && saved.q.every(Number.isFinite) &&
+        Math.hypot(saved.p[0] - ROUTE_PTS[saved.i][0], saved.p[2] - ROUTE_PTS[saved.i][2]) < 100 &&
+        Math.abs(saved.p[1] - collisionH(saved.p[0], saved.p[2])) < 8;
+      if (valid) {
+        driving = false;
+        resumePrompt = document.createElement('div'); resumePrompt.id = 'resumePrompt';
+        resumePrompt.innerHTML = '<div class="resume-card" role="dialog" aria-modal="true" aria-labelledby="resumeTitle"><h1 id="resumeTitle">Continue your drive?</h1><p>Your last position is saved on this device.</p><button type="button" data-resume="yes">Continue</button><button type="button" data-resume="no">Start at the beginning</button></div>';
+        document.body.appendChild(resumePrompt);
+        const choose = (resume) => {
+          if (resume) {
+            spawnAt(saved.i);
+            chassis.position.set(...saved.p);
+            chassis.quaternion.set(...saved.q);
+            chase.reset = true;
+          } else spawnAt(startI);
+          resumePrompt.remove(); resumePrompt = null; driving = true;
+        };
+        resumePrompt.querySelector('[data-resume="yes"]').addEventListener('click', () => choose(true));
+        resumePrompt.querySelector('[data-resume="no"]').addEventListener('click', () => choose(false));
+        resumePrompt.querySelector('[data-resume="yes"]').focus();
+      }
+    }
     const resetCar = () => spawnAt(roadIndexNear(chassis.position.x, chassis.position.z));
     const cycleCamera = () => { camMode = (camMode + 1) % 3; chase.reset = true; if (camMode === 2) camera.attachControl(canvas, true); else camera.detachControl(); };
     if (touchDriving) {
       document.body.classList.add('corridor-touch');
       const pad = document.createElement('div'); pad.id = 'driveTouch';
-      // two floating sticks (2026-10-19, the user's choice): the left half steers (sideways), the right half is gas (up) and
-      // brake / reverse (down). Each stick appears under the thumb; values are analog. Camera and reset stay buttons (the handbrake
-      // button was removed at the user's request, 2026-10-19; Space still works on a keyboard).
+      // A fixed steering pad stays where the left thumb expects it; separate, large pedals can be pressed without first
+      // dragging in the correct direction. Brake also selects reverse when stopped. Camera and reset stay above the drive area.
       pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button></div>' +
-        '<div class="stick-zone" data-stick="steer" aria-label="Steering stick: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
-        '<div class="stick-zone" data-stick="pedal" aria-label="Pedal stick: drag up for gas, down to brake and reverse"><div class="stick"><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>';
+        '<div class="stick-zone" data-stick="steer" aria-label="Steering: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
+        '<div class="touch-pedals"><button type="button" data-pedal="brake" aria-label="Hold to brake or reverse">BRAKE<span>REVERSE</span></button><button type="button" data-pedal="gas" aria-label="Hold to accelerate">GAS</button></div>';
       document.body.appendChild(pad);
       const R = 58, DEAD = 0.08;
-      const sticks = {};
+      const inputs = [];
       for (const zone of pad.querySelectorAll('.stick-zone')) {
-        const kind = zone.dataset.stick, base = zone.querySelector('.stick'), knob = zone.querySelector('.knob');
-        const S = sticks[kind] = { id: null, x0: 0, y0: 0, zone, base, knob };
-        const rest = () => { const r = zone.getBoundingClientRect(); base.style.left = (kind === 'steer' ? r.width * 0.42 : r.width * 0.58) + 'px'; base.style.top = r.height * 0.62 + 'px'; };
-        S.reset = () => { S.id = null; touchAxis[kind] = 0; knob.style.transform = 'translate(-50%, -50%)'; zone.classList.remove('active'); rest(); };
+        const knob = zone.querySelector('.knob');
+        const S = { id: null, x0: 0, zone, knob };
+        inputs.push(S);
+        S.reset = () => { S.id = null; touchAxis.steer = 0; knob.style.transform = 'translate(-50%, -50%)'; zone.classList.remove('active'); };
         const move = (e) => {
-          let dx = (e.clientX - S.x0) / R, dy = (S.y0 - e.clientY) / R;
-          if (kind === 'steer') dy = 0; else dx = 0;
-          const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
-          knob.style.transform = `translate(calc(-50% + ${dx * R}px), calc(-50% + ${-dy * R}px))`;
-          const v = kind === 'steer' ? dx : dy, a = Math.max(0, (Math.abs(v) - DEAD) / (1 - DEAD));
-          touchAxis[kind] = Math.sign(v) * (kind === 'steer' ? Math.pow(a, 1.6) : a);      // finer steering near the centre
+          const dx = Math.max(-1, Math.min(1, (e.clientX - S.x0) / R));
+          knob.style.transform = `translate(calc(-50% + ${dx * R}px), -50%)`;
+          const a = Math.max(0, (Math.abs(dx) - DEAD) / (1 - DEAD));
+          touchAxis.steer = Math.sign(dx) * Math.pow(a, 1.6);      // finer steering near the centre
         };
         zone.addEventListener('pointerdown', (e) => {
           if (S.id !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
-          e.preventDefault(); S.id = e.pointerId; const r = zone.getBoundingClientRect();
-          S.x0 = e.clientX; S.y0 = e.clientY; base.style.left = (e.clientX - r.left) + 'px'; base.style.top = (e.clientY - r.top) + 'px';
+          e.preventDefault(); S.id = e.pointerId; S.x0 = e.clientX;
           zone.classList.add('active'); move(e);
           try { zone.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
         });
@@ -4142,7 +4181,21 @@ void main() {
         zone.addEventListener('contextmenu', (e) => e.preventDefault());
         S.reset();
       }
-      const clear = () => { for (const S of Object.values(sticks)) S.reset(); };
+      for (const button of pad.querySelectorAll('[data-pedal]')) {
+        const key = button.dataset.pedal === 'gas' ? 'KeyW' : 'KeyS', S = { id: null };
+        inputs.push(S);
+        S.reset = () => { S.id = null; touchKeys[key] = false; button.classList.remove('pressed'); };
+        button.addEventListener('pointerdown', (e) => {
+          if (S.id !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
+          e.preventDefault(); S.id = e.pointerId; touchKeys[key] = true; button.classList.add('pressed');
+          try { button.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
+        });
+        const end = (e) => { if (e.pointerId === S.id) S.reset(); };
+        button.addEventListener('pointerup', end); button.addEventListener('pointercancel', end); button.addEventListener('lostpointercapture', end);
+        button.addEventListener('contextmenu', (e) => e.preventDefault());
+        S.reset();
+      }
+      const clear = () => { for (const S of inputs) S.reset(); };
       window.addEventListener('blur', clear);
       window.addEventListener('pagehide', clear);
       window.addEventListener('resize', clear);
@@ -4153,6 +4206,7 @@ void main() {
     mark('controls ready');
     window.addEventListener('blur', () => { for (const key of Object.keys(keys)) keys[key] = false; });
     window.addEventListener('keydown', (e) => {
+      if (resumePrompt) return;
       keys[e.code] = true;
       if (e.code === 'KeyR' && !e.repeat) resetCar();
       if (e.code === 'KeyC' && !e.repeat) cycleCamera();
@@ -4210,8 +4264,7 @@ void main() {
     const maxSteer = 0.42 + (0.09 - 0.42) * Math.min(1, kmh / 130), target = AP ? Math.max(-1, Math.min(1, AP.steer)) * maxSteer : (keySteer || stickSteer) * maxSteer;
     steer += (target - steer) * Math.min(1, dt * (target === 0 ? 4.0 : 2.4));
     let eng = 0, brake = 0;
-    const pedal = on ? touchAxis.pedal : 0;      // touch pedal stick: up gas, down brake then reverse (analog)
-    const thr = AP ? AP.thr : kUp && !kDown ? 1 : Math.max(0, pedal), brk = AP ? AP.brk : kDown ? 1 : Math.max(0, -pedal);
+    const thr = AP ? AP.thr : kUp && !kDown ? 1 : 0, brk = AP ? AP.brk : kDown ? 1 : 0;
     if (thr > 0) eng = -2500 * thr * Math.max(0, 1 - Math.pow(kmh / 205, 1.6)) * (vF < -0.5 ? 1.4 : 1);
     if (brk > 0) { if (vF > 0.8) brake = 60 * brk; else eng = 1100 * brk * Math.max(0, 1 - kmh / 35); }
     if (!thr && !brk) brake = on ? 4 : 0;
@@ -4296,7 +4349,7 @@ void main() {
   const fpsChip = isMobile && !QS.has('shot') ? document.body.appendChild(Object.assign(document.createElement('div'), { id: 'fpsChip', textContent: '– fps' })) : null;
   { let n = 0, t0 = performance.now(); scene.onAfterRenderObservable.add(() => { n++; const t = performance.now(); if (t - t0 < 500) return;
       const el = document.getElementById('fpsLine'); if (el) { const fps = n * 1000 / (t - t0); el.innerHTML = `<b>${fps.toFixed(0)} fps</b> · ${(1000 / fps).toFixed(1)} ms/frame · render scale ${(1 / engine.getHardwareScalingLevel()).toFixed(2)}`; }
-      if (fpsChip) fpsChip.textContent = Math.round(n * 1000 / (t - t0)) + ' fps';
+      if (fpsChip) fpsChip.textContent = Math.round(n * 1000 / (t - t0)) + ' fps · ' + renderScale.toFixed(2) + '×';
       n = 0; t0 = t; }); }
 
   updateAtmosphere(); applyLook();
