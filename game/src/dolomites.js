@@ -1869,7 +1869,14 @@ void main() {
   // Older exports collapsed every large footprint to "hotel". Prefer source tags on new
   // exports; broad, unnamed blocks use a conservative hall fallback, never a scaled-up house.
   const isHall = b => ['industrial', 'warehouse', 'commercial', 'retail'].includes(b.use) ||
-    ((!b.use || b.use === 'yes') && b.cls === 'hotel' && (b.patch !== 'garda' || ['riva', 'torbole'].every(name => { const lm = L0[name]; return !lm || Math.hypot(b.c[0] - lm[0], b.c[1] - lm[lm.length - 1]) > 450; })) && Math.min(b.len, b.wid) > 28 && b.len * b.wid > 1400 && !/hotel|albergo|residen|school|scuola|ospedale/i.test(b.name || ''));
+    ((!b.use || b.use === 'yes') && b.cls === 'hotel' && Math.min(b.len, b.wid) > 28 &&
+      ((b.len * b.wid > 3500) || (b.len * b.wid > 1400 && (b.patch !== 'garda' || ['riva', 'torbole'].every(name => { const lm = L0[name]; return !lm || Math.hypot(b.c[0] - lm[0], b.c[1] - lm[lm.length - 1]) > 450; })))) &&
+      !/hotel|albergo|residen|resort|school|scuola|ospedale/i.test(b.name || ''));
+  // Medium-sized unnamed blocks along the newer town streets have flat parapet roofs and continuous balconies;
+  // the small houses and named old hotels keep their tiled roofs. The same choice is used by both building LODs.
+  const modernTown = (b, rr, len, wid) => (b.patch === 'garda' || b.patch === 'bolzano') && b.cls === 'hotel' &&
+    len * wid > 400 && len * wid < 3500 && Math.min(len, wid) > 10 && rr > 0.62 &&
+    !/hotel|albergo|residen|resort/i.test(b.name || '');
   const roofRise = w => Math.min(3.4, w * 0.2);
   const townRoof = rr => [[0.22, 0.13, 0.10, L(5)], [0.27, 0.17, 0.13, L(5)], [0.19, 0.15, 0.13, L(5)], [0.24, 0.145, 0.11, L(5)]][Math.floor(rr * 19) % 4];
   const hallBuilding = (b, o, yaw, len, wid, rr) => {
@@ -1969,7 +1976,7 @@ void main() {
       const h = b.part === 'tower' ? 17 + rr * 7 : b.part === 'ruin' ? 4 + rr * 3 : 8 + rr * 6;
       G.box(o, yaw, 0, h / 2, 0, W / 2, h / 2, L / 2, C.stone); G.box(o, yaw, 0, h + 0.5, 0, W / 2 + 0.2, 0.5, L / 2 + 0.2, [0.3, 0.27, 0.24, LYR(3)]); return;
     }
-    const lake = b.patch === 'garda' || b.patch === 'bolzano';
+    const lake = b.patch === 'garda' || b.patch === 'bolzano', modern = modernTown(b, rr, L, W);
     if (lake && isHall(b)) { hallBuilding(b, o, yaw, L, W, rr); return; }
     const nf = b.cls === 'hut' ? 1 : b.cls === 'castle' ? 3 : Math.max(2, Math.min(lake && b.cls === 'hotel' ? 6 : 5, b.levels || 2)), Hs = 0.6 + nf * (lake ? 3.1 : 2.9);
     const pl = lake ? townPlaster(b, rr) : b.cls === 'hut' ? C.woodOld : PLASTER[Math.floor(rr * 11) % 4];
@@ -1977,7 +1984,18 @@ void main() {
     if (b.cls === 'hut' && !lake && barnKind(b) === 'tabla') { G.box(o, yaw, 0, 1.2, 0, W / 2, 1.2, L / 2, C.white); G.box(o, yaw, 0, 2.4 + 1.3, 0, W / 2 - 0.03, 1.3, L / 2 - 0.03, C.woodOld); G.roof(o, yaw, 5.0, W, L, W * 0.55, 0.8, C.shingle, C.woodOld); return; }
     G.box(o, yaw, 0, Hs / 2, 0, W / 2, Hs / 2, L / 2, b.cls === 'castle' ? C.stone : b.cls === 'hut' ? (lake ? pl : C.woodOld) : facade ? [pl[0], pl[1], pl[2], lake ? 1.5 : 1.75] : pl);
     if (lake && facade) {
-      G.hip(o, yaw, Hs, W, L, roofRise(W), 0.55, townRoof(rr));
+      if (modern) {
+        G.box(o, yaw, 0, Hs + 0.12, 0, W / 2 + 0.3, 0.12, L / 2 + 0.3, townRoof(rr));
+        for (const sd of [-1, 1]) {
+          G.box(o, yaw, sd * (W / 2 + 0.2), Hs + 0.42, 0, 0.12, 0.3, L / 2 + 0.3, FRAME_W);
+          G.box(o, yaw, 0, Hs + 0.42, sd * (L / 2 + 0.2), W / 2 + 0.3, 0.3, 0.12, FRAME_W);
+        }
+        if (bRoadDist(b.c[0], b.c[1]) < 240) for (let f = 1; f < nf; f++) for (const sd of [-1, 1]) {
+          const y = 0.6 + f * 3.1;
+          G.box(o, yaw, sd * (W / 2 + 0.48), y - 0.06, 0, 0.48, 0.06, L * 0.36, C.stone);
+          G.box(o, yaw, sd * (W / 2 + 0.92), y + 0.5, 0, 0.025, 0.5, L * 0.36, C.steel);
+        }
+      } else G.hip(o, yaw, Hs, W, L, roofRise(W), 0.55, townRoof(rr));
       // Readable silhouettes between full-detail cells: plinth, cornice and entrance.
       if (b.patch === 'garda' && L * W < 1000 && bRoadDist(b.c[0], b.c[1]) < 240) {
         G.box(o, yaw, 0, 0.4, 0, W / 2 + 0.06, 0.4, L / 2 + 0.06, C.stone);
@@ -2006,7 +2024,7 @@ void main() {
   function fullBuilding(b, o, yaw, L, W) {
     const h1 = (b.c[0] * 7.1 + b.c[1] * 3.7) % 1, rr = Math.abs(h1);
     flowerSeed = 1 + Math.floor(rr * 1e6);
-    const lakeStyle = b.patch === 'garda' || b.patch === 'bolzano';
+    const lakeStyle = b.patch === 'garda' || b.patch === 'bolzano', modern = modernTown(b, rr, L, W);
     const shut = SHUTTER[Math.floor(rr * 7) % 3], plaster = lakeStyle ? townPlaster(b, rr) : PLASTER[Math.floor(rr * 11) % 4];
     const winRow = (yb, h, w, opt, faces = ['x+', 'x-']) => {
       for (const f of faces) { const len = f[0] === 'x' ? L : W, n = Math.max(1, Math.floor((len - 1.2) / (opt.spacing || 2.6)));
@@ -2110,7 +2128,13 @@ void main() {
           winRow(yb, f === 0 ? 1.2 : 1.55, f === 0 ? 0.8 : 1.0, { frame: WHITE, shutters: f === 0 ? null : persiane, sill: WHITE, flowers: f === 1 && rr < 0.32, spacing: 3.0,
             skip: (fc, i, n) => f === 0 && fc === 'x+' && i === Math.floor(n / 2) }, ['x+', 'x-', 'z+', 'z-']);
         }
-        if (f === 1) for (const sd of [-1, 1]) {          // a small iron balcony in the middle of each long side
+        if (modern && f > 0) for (const sd of [-1, 1]) {      // newer lakeside and Adige apartment blocks: long open balconies
+          const y = 0.6 + f * fh;
+          G.box(o, yaw, sd * (W / 2 + 0.55), y - 0.06, 0, 0.55, 0.06, L * 0.38, C.stone);
+          G.box(o, yaw, sd * (W / 2 + 1.05), y + 0.48, 0, 0.025, 0.48, L * 0.38, IRON);
+          G.box(o, yaw, sd * (W / 2 + 1.05), y + 0.98, 0, 0.04, 0.04, L * 0.38, IRON);
+        }
+        if (!modern && f === 1) for (const sd of [-1, 1]) {          // a small iron balcony in the middle of each long side
           G.box(o, yaw, sd * (W / 2 + 0.45), 0.6 + fh - 0.05, 0, 0.45, 0.07, 1.0, C.stone);
           G.box(o, yaw, sd * (W / 2 + 0.88), 0.6 + fh + 1.0, 0, 0.035, 0.035, 1.04, IRON);
           for (let k = -4; k <= 4; k++) G.box(o, yaw, sd * (W / 2 + 0.88), 0.6 + fh + 0.5, k * 0.25, 0.018, 0.5, 0.018, IRON);
@@ -2124,8 +2148,16 @@ void main() {
       if (rr < 0.45) for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
         G.box(o, yaw, sx * (W / 2 - 0.12), wallTop / 2, sz * (L / 2 - 0.12), 0.16, wallTop / 2, 0.16, WHITE);
       }
-      G.hip(o, yaw, wallTop, W, L, roofRise(W), 0.7, townRoof(rr));
-      chimney(o, yaw, -W * 0.15, L * 0.25, wallTop + roofRise(W) * 0.6);
+      if (modern) {
+        G.box(o, yaw, 0, wallTop + 0.12, 0, W / 2 + 0.3, 0.12, L / 2 + 0.3, townRoof(rr));
+        for (const sd of [-1, 1]) {
+          G.box(o, yaw, sd * (W / 2 + 0.2), wallTop + 0.42, 0, 0.12, 0.3, L / 2 + 0.3, WHITE);
+          G.box(o, yaw, 0, wallTop + 0.42, sd * (L / 2 + 0.2), W / 2 + 0.3, 0.3, 0.12, WHITE);
+        }
+      } else {
+        G.hip(o, yaw, wallTop, W, L, roofRise(W), 0.7, townRoof(rr));
+        chimney(o, yaw, -W * 0.15, L * 0.25, wallTop + roofRise(W) * 0.6);
+      }
     } else if (lakeStyle && b.cls === 'church') {
       const Hc = 10; G.box(o, yaw, 0, Hc / 2, 0, W / 2, Hc / 2, L / 2, plaster); G.roof(o, yaw, Hc, W, L, W * 0.3, 0.4, TERRACOTTA, plaster);
       // campanile: a slender stone tower with an open belfry and a pyramid cap
@@ -4152,10 +4184,46 @@ void main() {
       const pad = document.createElement('div'); pad.id = 'driveTouch';
       // A fixed steering pad stays where the left thumb expects it; separate, large pedals can be pressed without first
       // dragging in the correct direction. Brake also selects reverse when stopped. Camera and reset stay above the drive area.
-      pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button></div>' +
+      pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button><button type="button" data-action="fullscreen" aria-label="Use full screen">Full screen</button></div>' +
         '<div class="stick-zone" data-stick="steer" aria-label="Steering: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
         '<div class="touch-pedals"><button type="button" data-pedal="brake" aria-label="Hold to brake or reverse">BRAKE<span>REVERSE</span></button><button type="button" data-pedal="gas" aria-label="Hold to accelerate">GAS</button></div>';
       document.body.appendChild(pad);
+      const fullButton = pad.querySelector('[data-action="fullscreen"]');
+      if (navigator.standalone || matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches) fullButton.hidden = true;
+      fullButton.addEventListener('click', async () => {
+        if (document.fullscreenElement) { await document.exitFullscreen(); return; }
+        try {
+          if (document.documentElement.requestFullscreen) {
+            await document.documentElement.requestFullscreen();
+            return;
+          }
+        } catch (_) { /* iPhone Safari requires a Home Screen launch for fullscreen */ }
+        let hint = document.getElementById('fullscreenHint');
+        if (!hint) {
+          hint = document.createElement('div'); hint.id = 'fullscreenHint'; hint.setAttribute('role', 'status');
+          hint.textContent = 'For full screen on iPhone: Share → Add to Home Screen, then open Po Vibe from its icon.';
+          document.body.appendChild(hint);
+        }
+        hint.hidden = false;
+        clearTimeout(hint.hideTimer);
+        hint.hideTimer = setTimeout(() => { hint.hidden = true; }, 7000);
+      });
+      // Safari's browser bars can make its visual viewport shorter than the layout viewport.
+      // Size and position the controls to the actually visible rectangle after every toolbar/rotation change.
+      const layoutTouch = () => {
+        const v = window.visualViewport;
+        pad.style.left = `${v ? v.offsetLeft : 0}px`;
+        pad.style.top = `${v ? v.offsetTop : 0}px`;
+        pad.style.width = `${v ? v.width : innerWidth}px`;
+        pad.style.height = `${v ? v.height : innerHeight}px`;
+      };
+      layoutTouch();
+      window.addEventListener('resize', layoutTouch);
+      window.addEventListener('orientationchange', layoutTouch);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', layoutTouch);
+        window.visualViewport.addEventListener('scroll', layoutTouch);
+      }
       const R = 58, DEAD = 0.08;
       const inputs = [];
       for (const zone of pad.querySelectorAll('.stick-zone')) {
