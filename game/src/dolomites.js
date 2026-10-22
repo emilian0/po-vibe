@@ -4732,8 +4732,9 @@ void main() {
   let frames = 0; scene.onAfterRenderObservable.add(() => frames++);
   // dynamic resolution: hold ~35 fps (GPU time when the browser reports it, frame time otherwise) between the tier's limits
   // phones (2026-10-19): the low tier rendered at 1 px per CSS px (a third of an iPhone's resolution) while holding 60 fps. Without a
-  // GPU timer (iOS) the frame time is capped by vsync, so a steady ~16.7 ms frame counts as headroom; target ~45 fps on phones
-  const TARGET_MS = +(QS.get('targetms') || (isMobile ? 22 : 28));
+  // GPU timer (iOS) the frame time is capped by vsync, so a steady ~16.7 ms frame counts as headroom; target ~57 fps on phones
+  // when sharpening the image, rather than allowing the adaptive scale to spend the spare time down to ~45 fps.
+  const TARGET_MS = +(QS.get('targetms') || (isMobile ? 17.5 : 28));
   // a resize mid-loop showed one frame of the page background (a light-blue flash on the phone), so changes wait for the start of
   // the next frame; and a level that proved too slow becomes the ceiling, so the resolution settles instead of swinging every few seconds
   let dynT = performance.now(), dynFrames = 0, dynHold = 0, dynCeil = Q.scale[1], lastUp = 0;
