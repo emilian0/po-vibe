@@ -66,6 +66,7 @@
 #driveTouch .touch-pedals button { min-width: 90px; width: min(19vw, 122px); height: 105px; border-radius: 28px; background: rgba(18, 26, 29, .74); font-size: 19px; }
 #driveTouch .touch-pedals [data-pedal="gas"] { height: 136px; border-color: rgba(185, 233, 172, .8); }
 #driveTouch .touch-pedals [data-pedal="brake"] { border-color: rgba(245, 187, 156, .8); }
+#driveTouch .touch-pedals button.pressed { background: #e8bb52; color: #192127; border-color: #ffe4a1; }
 .touch-pedals span { display: block; font-size: 10px; letter-spacing: .06em; opacity: .8; }
 #fpsChip { position: fixed; z-index: 13; right: max(10px, env(safe-area-inset-right)); top: max(10px, env(safe-area-inset-top)); pointer-events: none;
   padding: 4px 8px; border-radius: 8px; background: rgba(20, 26, 22, 0.45); color: #f4f6f2; font: 600 13px/1 inherit; font-family: inherit; font-variant-numeric: tabular-nums; }

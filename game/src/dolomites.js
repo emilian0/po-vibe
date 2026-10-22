@@ -4080,7 +4080,7 @@ void main() {
   };
   const SAVE_KEY = 'po-dolomites-position-v1';
   const routeStamp = [ROUTE_PTS.length, Math.round(ROUTE_S.at(-1)), Math.round(ROUTE_PTS[0][0]), Math.round(ROUTE_PTS[0][2])].join(':');
-  const normalDrive = !['shot', 'diag', 'autodrive', 'at', 'road', 'touch'].some(k => QS.has(k));
+  const normalDrive = !['shot', 'diag', 'autodrive', 'at', 'road'].some(k => QS.has(k)) && !(QS.has('touch') && !isTouch);
   let resumePrompt = null;
   if (DRIVE) {
     physWorld = new CANNON.World(); physWorld.gravity.set(0, -9.81, 0); physWorld.broadphase = new CANNON.SAPBroadphase(physWorld); physWorld.solver.iterations = 10;
