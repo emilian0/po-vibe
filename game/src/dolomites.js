@@ -4244,7 +4244,10 @@ void main() {
         };
         const rest = () => {
           const p = placement(); S.R = p.R;
-          base.style.left = Math.min(p.maxX, Math.max(p.mx, p.r.width / 2)) + 'px';
+          // Keep the resting thumbs near the outside edges, especially in landscape; preserve full travel on small phones.
+          const edge = Math.min(150, p.r.width * 0.35);
+          const x = kind === 'steer' ? edge : p.r.width - edge;
+          base.style.left = Math.min(p.maxX, Math.max(p.mx, x)) + 'px';
           base.style.top = Math.min(p.maxY, Math.max(p.my, p.r.height * 0.62)) + 'px';
         };
         S.reset = () => { S.id = null; touchAxis[kind] = 0; knob.style.transform = 'translate(-50%, -50%)'; zone.classList.remove('active'); rest(); };
