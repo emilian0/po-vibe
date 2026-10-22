@@ -4074,7 +4074,7 @@ void main() {
 
   // ---------- driving: cannon RaycastVehicle (same tuning as the Po map) on a heightfield window that follows the car ----------
   const DRIVE = !QS.has('shot') && car && typeof CANNON !== 'undefined';
-  const keys = {}, touchKeys = {}, touchAxis = { steer: 0 };      // fixed steering pad; gas and brake are independent hold buttons
+  const keys = {}, touchKeys = {}, touchAxis = { steer: 0, pedal: 0 };      // two analog thumb sticks: steer left, gas/brake right
   const touchDriving = isTouch || navigator.maxTouchPoints > 0 || QS.has('touch');
   let driving = false, chassis = null, vehicle = null, steer = 0, camMode = 0, physWorld = null;
   const chase = { heading: null, height: null, clearance: null, reset: true };
@@ -4182,11 +4182,10 @@ void main() {
     if (touchDriving) {
       document.body.classList.add('corridor-touch');
       const pad = document.createElement('div'); pad.id = 'driveTouch';
-      // A fixed steering pad stays where the left thumb expects it; separate, large pedals can be pressed without first
-      // dragging in the correct direction. Brake also selects reverse when stopped. Camera and reset stay above the drive area.
+      // Two floating analog sticks: left steers, right controls gas and brake/reverse.
       pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button><button type="button" data-action="fullscreen" aria-label="Use full screen">Full screen</button></div>' +
-        '<div class="stick-zone" data-stick="steer" aria-label="Steering: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
-        '<div class="touch-pedals"><button type="button" data-pedal="brake" aria-label="Hold to brake or reverse">BRAKE<span>REVERSE</span></button><button type="button" data-pedal="gas" aria-label="Hold to accelerate">GAS</button></div>';
+        '<div class="stick-zone" data-stick="steer" aria-label="Steering stick: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
+        '<div class="stick-zone" data-stick="pedal" aria-label="Pedal stick: drag up for gas, down to brake and reverse"><div class="stick"><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>';
       document.body.appendChild(pad);
       const fullButton = pad.querySelector('[data-action="fullscreen"]');
       if (navigator.standalone || matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches) fullButton.hidden = true;
@@ -4225,21 +4224,24 @@ void main() {
         window.visualViewport.addEventListener('scroll', layoutTouch);
       }
       const R = 58, DEAD = 0.08;
-      const inputs = [];
+      const sticks = {};
       for (const zone of pad.querySelectorAll('.stick-zone')) {
-        const knob = zone.querySelector('.knob');
-        const S = { id: null, x0: 0, zone, knob };
-        inputs.push(S);
-        S.reset = () => { S.id = null; touchAxis.steer = 0; knob.style.transform = 'translate(-50%, -50%)'; zone.classList.remove('active'); };
+        const kind = zone.dataset.stick, base = zone.querySelector('.stick'), knob = zone.querySelector('.knob');
+        const S = sticks[kind] = { id: null, x0: 0, y0: 0, zone, base, knob };
+        const rest = () => { const r = zone.getBoundingClientRect(); base.style.left = (kind === 'steer' ? r.width * 0.42 : r.width * 0.58) + 'px'; base.style.top = r.height * 0.62 + 'px'; };
+        S.reset = () => { S.id = null; touchAxis[kind] = 0; knob.style.transform = 'translate(-50%, -50%)'; zone.classList.remove('active'); rest(); };
         const move = (e) => {
-          const dx = Math.max(-1, Math.min(1, (e.clientX - S.x0) / R));
-          knob.style.transform = `translate(calc(-50% + ${dx * R}px), -50%)`;
-          const a = Math.max(0, (Math.abs(dx) - DEAD) / (1 - DEAD));
-          touchAxis.steer = Math.sign(dx) * Math.pow(a, 1.6);      // finer steering near the centre
+          let dx = (e.clientX - S.x0) / R, dy = (S.y0 - e.clientY) / R;
+          if (kind === 'steer') dy = 0; else dx = 0;
+          const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
+          knob.style.transform = `translate(calc(-50% + ${dx * R}px), calc(-50% + ${-dy * R}px))`;
+          const v = kind === 'steer' ? dx : dy, a = Math.max(0, (Math.abs(v) - DEAD) / (1 - DEAD));
+          touchAxis[kind] = Math.sign(v) * (kind === 'steer' ? Math.pow(a, 1.6) : a);      // finer steering near the centre
         };
         zone.addEventListener('pointerdown', (e) => {
           if (S.id !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
-          e.preventDefault(); S.id = e.pointerId; S.x0 = e.clientX;
+          e.preventDefault(); S.id = e.pointerId; const r = zone.getBoundingClientRect();
+          S.x0 = e.clientX; S.y0 = e.clientY; base.style.left = (e.clientX - r.left) + 'px'; base.style.top = (e.clientY - r.top) + 'px';
           zone.classList.add('active'); move(e);
           try { zone.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
         });
@@ -4249,21 +4251,7 @@ void main() {
         zone.addEventListener('contextmenu', (e) => e.preventDefault());
         S.reset();
       }
-      for (const button of pad.querySelectorAll('[data-pedal]')) {
-        const key = button.dataset.pedal === 'gas' ? 'KeyW' : 'KeyS', S = { id: null };
-        inputs.push(S);
-        S.reset = () => { S.id = null; touchKeys[key] = false; button.classList.remove('pressed'); };
-        button.addEventListener('pointerdown', (e) => {
-          if (S.id !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
-          e.preventDefault(); S.id = e.pointerId; touchKeys[key] = true; button.classList.add('pressed');
-          try { button.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
-        });
-        const end = (e) => { if (e.pointerId === S.id) S.reset(); };
-        button.addEventListener('pointerup', end); button.addEventListener('pointercancel', end); button.addEventListener('lostpointercapture', end);
-        button.addEventListener('contextmenu', (e) => e.preventDefault());
-        S.reset();
-      }
-      const clear = () => { for (const S of inputs) S.reset(); };
+      const clear = () => { for (const S of Object.values(sticks)) S.reset(); };
       window.addEventListener('blur', clear);
       window.addEventListener('pagehide', clear);
       window.addEventListener('resize', clear);
@@ -4332,7 +4320,8 @@ void main() {
     const maxSteer = 0.42 + (0.09 - 0.42) * Math.min(1, kmh / 130), target = AP ? Math.max(-1, Math.min(1, AP.steer)) * maxSteer : (keySteer || stickSteer) * maxSteer;
     steer += (target - steer) * Math.min(1, dt * (target === 0 ? 4.0 : 2.4));
     let eng = 0, brake = 0;
-    const thr = AP ? AP.thr : kUp && !kDown ? 1 : 0, brk = AP ? AP.brk : kDown ? 1 : 0;
+    const pedal = on ? touchAxis.pedal : 0;      // touch pedal stick: up gas, down brake then reverse (analog)
+    const thr = AP ? AP.thr : kUp && !kDown ? 1 : Math.max(0, pedal), brk = AP ? AP.brk : kDown ? 1 : Math.max(0, -pedal);
     if (thr > 0) eng = -2500 * thr * Math.max(0, 1 - Math.pow(kmh / 205, 1.6)) * (vF < -0.5 ? 1.4 : 1);
     if (brk > 0) { if (vF > 0.8) brake = 60 * brk; else eng = 1100 * brk * Math.max(0, 1 - kmh / 35); }
     if (!thr && !brk) brake = on ? 4 : 0;
