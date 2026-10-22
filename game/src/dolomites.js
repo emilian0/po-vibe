@@ -4184,8 +4184,8 @@ void main() {
       const pad = document.createElement('div'); pad.id = 'driveTouch';
       // Two floating analog sticks: left steers, right controls gas and brake/reverse.
       pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button><button type="button" data-action="fullscreen" aria-label="Use full screen">Full screen</button></div>' +
-        '<div class="stick-zone" data-stick="steer" aria-label="Steering stick: drag left or right"><div class="stick"><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
-        '<div class="stick-zone" data-stick="pedal" aria-label="Pedal stick: drag up for gas, down to brake and reverse"><div class="stick"><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>';
+        '<div class="stick-zone" data-stick="steer" aria-label="Steering joystick: drag left or right"><div class="stick"><span class="stick-dir steer-left">◀</span><span class="stick-dir steer-right">▶</span><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
+        '<div class="stick-zone" data-stick="pedal" aria-label="Throttle joystick: drag up for gas, down to brake and reverse"><div class="stick"><span class="stick-dir pedal-gas">GAS</span><span class="stick-dir pedal-brake">BRAKE</span><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>';
       document.body.appendChild(pad);
       const fullButton = pad.querySelector('[data-action="fullscreen"]');
       if (navigator.standalone || matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches) fullButton.hidden = true;
@@ -4223,14 +4223,27 @@ void main() {
         window.visualViewport.addEventListener('resize', layoutTouch);
         window.visualViewport.addEventListener('scroll', layoutTouch);
       }
-      const R = 58, DEAD = 0.08;
+      const DEAD = 0.08;
       const sticks = {};
       for (const zone of pad.querySelectorAll('.stick-zone')) {
         const kind = zone.dataset.stick, base = zone.querySelector('.stick'), knob = zone.querySelector('.knob');
-        const S = sticks[kind] = { id: null, x0: 0, y0: 0, zone, base, knob };
-        const rest = () => { const r = zone.getBoundingClientRect(); base.style.left = (kind === 'steer' ? r.width * 0.42 : r.width * 0.58) + 'px'; base.style.top = r.height * 0.62 + 'px'; };
+        const S = sticks[kind] = { id: null, x0: 0, y0: 0, R: 58, zone, base, knob };
+        // A thumb can start anywhere in its half of the screen, but the entire stick and its travel must remain visible.
+        const placement = () => {
+          const r = zone.getBoundingClientRect();
+          const safeBottom = parseFloat(getComputedStyle(document.documentElement).paddingBottom) || 0;
+          const R = Math.max(20, Math.min(58, (r.width - 72) / 2, (r.height - safeBottom - 72) / 2));
+          const mx = kind === 'steer' ? R + 34 : 48, my = R + 34;
+          return { r, R, mx, my, maxX: Math.max(mx, r.width - mx), maxY: Math.max(my, r.height - my - safeBottom) };
+        };
+        const rest = () => {
+          const p = placement(); S.R = p.R;
+          base.style.left = Math.min(p.maxX, Math.max(p.mx, p.r.width / 2)) + 'px';
+          base.style.top = Math.min(p.maxY, Math.max(p.my, p.r.height * 0.62)) + 'px';
+        };
         S.reset = () => { S.id = null; touchAxis[kind] = 0; knob.style.transform = 'translate(-50%, -50%)'; zone.classList.remove('active'); rest(); };
         const move = (e) => {
+          const R = S.R;
           let dx = (e.clientX - S.x0) / R, dy = (S.y0 - e.clientY) / R;
           if (kind === 'steer') dy = 0; else dx = 0;
           const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
@@ -4240,8 +4253,10 @@ void main() {
         };
         zone.addEventListener('pointerdown', (e) => {
           if (S.id !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
-          e.preventDefault(); S.id = e.pointerId; const r = zone.getBoundingClientRect();
-          S.x0 = e.clientX; S.y0 = e.clientY; base.style.left = (e.clientX - r.left) + 'px'; base.style.top = (e.clientY - r.top) + 'px';
+          e.preventDefault(); S.id = e.pointerId; const p = placement(); S.R = p.R;
+          S.x0 = e.clientX; S.y0 = e.clientY;
+          base.style.left = Math.min(p.maxX, Math.max(p.mx, e.clientX - p.r.left)) + 'px';
+          base.style.top = Math.min(p.maxY, Math.max(p.my, e.clientY - p.r.top)) + 'px';
           zone.classList.add('active'); move(e);
           try { zone.setPointerCapture(e.pointerId); } catch (_) { /* synthetic test events have no active pointer */ }
         });

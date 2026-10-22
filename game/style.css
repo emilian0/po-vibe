@@ -56,14 +56,19 @@
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .stick-zone[data-stick="steer"] { left: 0; }
 .stick-zone[data-stick="pedal"] { right: 0; }
-.stick { position: absolute; width: 132px; height: 132px; margin: -66px 0 0 -66px; border-radius: 50%;
-  background: rgba(18, 26, 29, .28); border: 2px solid rgba(255,255,255,.35); opacity: .55; transition: opacity .15s; }
-.stick-zone[data-stick="steer"] .stick { border-radius: 66px / 40px; height: 80px; margin-top: -40px; }
-.stick-zone[data-stick="pedal"] .stick { border-radius: 40px / 66px; width: 80px; margin-left: -40px; }
+.stick { position: absolute; border: 2px solid rgba(255,255,255,.72); background: rgba(17, 29, 33, .65);
+  box-shadow: 0 3px 14px rgba(0,0,0,.26); opacity: .86; transition: opacity .15s; }
+.stick-zone[data-stick="steer"] .stick { width: 154px; height: 88px; margin: -44px 0 0 -77px; border-radius: 48px; }
+.stick-zone[data-stick="pedal"] .stick { width: 94px; height: 164px; margin: -82px 0 0 -47px; border-radius: 48px; }
 .stick-zone.active .stick { opacity: 1; transition: none; }
 .knob { position: absolute; left: 50%; top: 50%; width: 60px; height: 60px; border-radius: 50%; transform: translate(-50%, -50%);
-  background: rgba(255,255,255,.82); box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+  background: #e9efec; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.35); }
 .stick-zone.active .knob { background: #e8bb52; }
+.stick-dir { position: absolute; color: rgba(255,255,255,.9); font-size: 11px; font-weight: 800; letter-spacing: .04em; pointer-events: none; }
+.steer-left, .steer-right { top: 50%; transform: translateY(-50%); }
+.steer-left { left: 7px; } .steer-right { right: 7px; }
+.pedal-gas, .pedal-brake { left: 0; right: 0; text-align: center; }
+.pedal-gas { top: 10px; } .pedal-brake { bottom: 10px; }
 .stick-label { position: absolute; bottom: max(10px, env(safe-area-inset-bottom)); left: 0; right: 0; text-align: center;
   font-size: 11px; font-weight: 700; letter-spacing: .08em; color: rgba(255,255,255,.7); text-shadow: 0 1px 3px rgba(0,0,0,.6); pointer-events: none; }
 #driveTouch button[hidden] { display: none; }
