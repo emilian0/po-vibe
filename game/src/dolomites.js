@@ -684,8 +684,30 @@ float carAO(vec3 p) {
   // target that was left are dropped on arrival. Nearest tiles load first, 12 at a time.
   function terrainStream(T, S, upload) {
     const TPL = S / T, st = GLV.map((L) => ({ L, tgt: L.win ? null : [0, 0], slot: new Int32Array(TPL * TPL).fill(-1), done: false }));
-    let queue = [], inflight = 0, dirty = true, fails = 0, cx0 = 0, cz0 = 0;
+    let queue = [], inflight = 0, dirty = true, queueDirty = false, fails = 0, cx0 = 0, cz0 = 0;
     const wanted = new Set(), api = { onTile: null, loaded: 0, bytes: 0 };
+    const packCache = new Map(), packSize = TILES.pack || 0;
+    const packedTile = async (L, tx, ty) => {
+      const px = Math.floor(tx / packSize), py = Math.floor(ty / packSize), key = L.name + '/' + py + '_' + px;
+      let entry = packCache.get(key);
+      if (entry) packCache.delete(key);
+      else {
+        entry = (async () => {
+          const r = await fetch(assetUrl(MAP + 'tiles/' + key + '.pb'));
+          if (!r.ok) throw new Error('terrain pack ' + key + ' (' + r.status + ')');
+          const buf = await r.arrayBuffer(), dv = new DataView(buf);
+          if (dv.getUint8(0) !== 80 || dv.getUint8(1) !== 66 || dv.getUint8(2) !== 49 || dv.getUint8(3) !== packSize) throw new Error('bad terrain pack ' + key);
+          const offsets = [4 + 4 * packSize * packSize];
+          for (let i = 0; i < packSize * packSize; i++) offsets.push(offsets[i] + dv.getUint32(4 + 4 * i, true));
+          if (offsets.at(-1) !== buf.byteLength) throw new Error('terrain pack length ' + key);
+          return { buf, offsets };
+        })().catch((e) => { packCache.delete(key); throw e; });
+      }
+      packCache.set(key, entry);
+      while (packCache.size > 24) packCache.delete(packCache.keys().next().value);
+      const { buf, offsets } = await entry, i = (ty % packSize) * packSize + (tx % packSize);
+      return buf.slice(offsets[i], offsets[i + 1]);
+    };
     const setCom = (i, r) => { lvWArr.set(r, i * 4); dirty = true; };
     const inTgt = (s, tx, ty) => { const o = s.tgt; return o && tx * T >= o[0] && tx * T < o[0] + S && ty * T >= o[1] && ty * T < o[1] + S; };
     const slotOf = (tx, ty) => (ty % TPL) * TPL + (tx % TPL);
@@ -704,7 +726,10 @@ float carAO(vec3 p) {
       inflight++;
       try {
         let buf = null;
-        for (let k = 0; k < 3 && !buf; k++) { try { const r = await fetch(assetUrl(MAP + 'tiles/' + s.L.name + '/' + ty + '_' + tx + '.pt')); if (r.ok) buf = await r.arrayBuffer(); } catch (_) { /* retried */ } }
+        for (let k = 0; k < 3 && !buf; k++) { try {
+          if (packSize) buf = await packedTile(s.L, tx, ty);
+          else { const r = await fetch(assetUrl(MAP + 'tiles/' + s.L.name + '/' + ty + '_' + tx + '.pt')); if (r.ok) buf = await r.arrayBuffer(); }
+        } catch (_) { /* retried */ } }
         if (!buf) { if (fails++ < 3) console.error('terrain tile failed', s.L.name, ty, tx); return; }
         const head = new Uint8Array(buf, 0, 5); if (head[0] !== 80 || head[1] !== 84 || head[2] !== 49 || head[3] !== T) throw new Error('bad terrain tile ' + key);
         const u8 = new Uint8Array(await inflate(buf.slice(5)));
@@ -721,7 +746,7 @@ float carAO(vec3 p) {
       } finally { inflight--; wanted.delete(key); pump(); }
     };
     const pump = () => {
-      if (queue.length > 1 && api.sortAt !== api.loaded) { queue.sort((a, b) => a.d - b.d); api.sortAt = api.loaded; }
+      if (queueDirty) { queue.sort((a, b) => a.d - b.d); queueDirty = false; }
       while (inflight < 12 && queue.length) {
         const j = queue.shift();
         if (!inTgt(j.s, j.tx, j.ty) || j.s.slot[slotOf(j.tx, j.ty)] === j.ty * (j.s.L.N / T) + j.tx) { wanted.delete(j.key); continue; }
@@ -734,7 +759,7 @@ float carAO(vec3 p) {
         const key = L.i + ':' + ty + '_' + tx;
         if (s.slot[slotOf(tx, ty)] === ty * nt + tx || wanted.has(key)) continue;
         const wx = L.cx - L.half + (tx + 0.5) * T * L.res, wz = L.cz + L.half - (ty + 0.5) * T * L.res;
-        wanted.add(key); queue.push({ s, tx, ty, key, d: Math.max(Math.abs(wx - cx0), Math.abs(wz - cz0)) });
+        wanted.add(key); queue.push({ s, tx, ty, key, d: Math.max(Math.abs(wx - cx0), Math.abs(wz - cz0)) }); queueDirty = true;
       }
     };
     api.update = (cx, cz) => {
@@ -1868,20 +1893,38 @@ void main() {
   const townPlaster = (b, rr) => { const palette = b.patch === 'garda' ? PLASTER_GARDA : PLASTER_LAKE; return palette[Math.floor(rr * 13) % palette.length]; };
   // Older exports collapsed every large footprint to "hotel". Prefer source tags on new
   // exports; broad, unnamed blocks use a conservative hall fallback, never a scaled-up house.
-  const isHall = b => ['industrial', 'warehouse', 'commercial', 'retail'].includes(b.use) ||
+  const isHall = b => ['industrial', 'warehouse'].includes(b.use) ||
+    (['commercial', 'retail'].includes(b.use) && (b.len * b.wid > 600 || Math.min(b.len, b.wid) > 18)) ||
     ((!b.use || b.use === 'yes') && b.cls === 'hotel' && Math.min(b.len, b.wid) > 28 &&
       ((b.len * b.wid > 3500) || (b.len * b.wid > 1400 && (b.patch !== 'garda' || ['riva', 'torbole'].every(name => { const lm = L0[name]; return !lm || Math.hypot(b.c[0] - lm[0], b.c[1] - lm[lm.length - 1]) > 450; })))) &&
       !/hotel|albergo|residen|resort|school|scuola|ospedale/i.test(b.name || ''));
-  // Medium-sized unnamed blocks along the newer town streets have flat parapet roofs and continuous balconies;
-  // the small houses and named old hotels keep their tiled roofs. The same choice is used by both building LODs.
-  const modernTown = (b, rr, len, wid) => (b.patch === 'garda' || b.patch === 'bolzano') && b.cls === 'hotel' &&
-    len * wid > 400 && len * wid < 3500 && Math.min(len, wid) > 10 && rr > 0.62 &&
-    !/hotel|albergo|residen|resort/i.test(b.name || '');
+  // OSM often has a use but no reliable floor count. Give detached villas, historic houses and
+  // later apartment blocks different heights; preserve surveyed floor counts and named hotels.
+  const townFloors = (b, rr, len, wid) => {
+    const clamp = n => Math.max(2, Math.min(b.cls === 'hotel' ? 6 : 5, n));
+    if (b.levels_explicit || b.name) return clamp(b.levels || 3);
+    const area = len * wid;
+    if (b.use === 'detached' || b.use === 'house') return area < 400 && rr < 0.68 ? 2 : 3;
+    if (b.use === 'apartments') return area > 900 ? 5 : area > 320 && rr > 0.38 ? 4 : 3;
+    if (b.cls === 'house') return area < 145 && rr < 0.52 ? 2 : area > 220 && rr > 0.84 ? 4 : 3;
+    return area > 1000 && rr > 0.45 ? 5 : area > 600 ? 4 : clamp(b.levels || 3);
+  };
+  const villaTown = (b, len, wid) => (b.use === 'detached' || b.use === 'house') && len * wid < 400 && Math.min(len, wid) > 6;
+  const shopTown = (b, rr, modern, villa, roadD) => !modern && !villa && roadD < 25 &&
+    (b.use === 'retail' || b.use === 'commercial' || (b.cls === 'hotel' && rr < 0.35));
+  // Apartment uses select the newer blocks; narrow waterfront footprints stay in the old-town set.
+  const modernTown = (b, rr, len, wid) => {
+    if ((b.patch !== 'garda' && b.patch !== 'bolzano') || b.cls !== 'hotel' || len * wid >= 3500) return false;
+    const riva = L0.riva, nearOldTown = b.patch === 'garda' && riva && Math.hypot(b.c[0] - riva[0], b.c[1] - riva[1]) < 450;
+    if (b.use === 'apartments') return len * wid > 220 && Math.min(len, wid) > 9 && rr > (nearOldTown ? 0.72 : 0.28);
+    return len * wid > 400 && Math.min(len, wid) > 10 && rr > 0.62 && !/hotel|albergo|residen|resort/i.test(b.name || '');
+  };
   const roofRise = w => Math.min(3.4, w * 0.2);
   const townRoof = rr => [[0.22, 0.13, 0.10, L(5)], [0.27, 0.17, 0.13, L(5)], [0.19, 0.15, 0.13, L(5)], [0.24, 0.145, 0.11, L(5)]][Math.floor(rr * 19) % 4];
   const hallBuilding = (b, o, yaw, len, wid, rr) => {
     const h = 5.5 + rr * 3.5, wall = [0.34 + rr * 0.07, 0.34 + rr * 0.065, 0.32 + rr * 0.07, L(2)];
     const roof = [0.19 + rr * 0.07, 0.205 + rr * 0.07, 0.205 + rr * 0.07, L(7)], trim = [0.22, 0.235, 0.23, L(7)];
+    const works = b.use !== 'retail' && b.use !== 'commercial';
     G.box(o, yaw, 0, h / 2, 0, wid / 2, h / 2, len / 2, wall);
     G.box(o, yaw, 0, 0.55, 0, wid / 2 + 0.03, 0.55, len / 2 + 0.03, C.stone);
     G.box(o, yaw, 0, h, 0, wid / 2 + 0.2, 0.25, len / 2 + 0.2, roof);
@@ -1899,6 +1942,19 @@ void main() {
         const z = -len / 2 + (j + 0.5) * len / baysL;
         G.box(o, yaw, sd * (wid / 2 + 0.06), 2.0, z, 0.05, 1.8, 1.9, trim);
       }
+    }
+    // Bolzano South references: loading bays on working sheds, glazed street frontage on retail halls.
+    const openings = Math.min(10, Math.max(2, Math.floor(len / (works ? 13 : 9))));
+    for (let j = 0; j < openings; j++) {
+      const z = -len / 2 + (j + 0.5) * len / openings;
+      G.box(o, yaw, wid / 2 + 0.085, works ? 1.8 : 1.6, z, 0.035, works ? 1.55 : 1.4,
+        Math.min(works ? 2.7 : 3.1, len / openings * 0.36), works ? [0.19, 0.22, 0.23, L(7)] : [0.06, 0.09, 0.1, L(7)]);
+    }
+    if (works && len > 25 && wid > 20 && rr > 0.36) {
+      const wingLen = Math.min(18, len * 0.28), wingH = Math.min(h - 0.4, 5.1), z = -len / 2 + wingLen / 2 + 2;
+      G.box(o, yaw, wid / 2 + 1.65, wingH / 2, z, 1.65, wingH / 2, wingLen / 2, [0.42, 0.39, 0.34, L(2)]);
+      G.box(o, yaw, wid / 2 + 3.33, wingH - 1.6, z, 0.04, 0.55, wingLen * 0.4, [0.055, 0.075, 0.08, L(7)]);
+      G.box(o, yaw, wid / 2 + 1.7, wingH + 0.05, z, 1.85, 0.08, wingLen / 2 + 0.15, trim);
     }
   };
   const SHUTTER = [[0.04, 0.12, 0.06], [0.11, 0.06, 0.03], [0.05, 0.07, 0.1]], FRAME_W = [0.5, 0.48, 0.44, L(2)];
@@ -1976,28 +2032,101 @@ void main() {
       const h = b.part === 'tower' ? 17 + rr * 7 : b.part === 'ruin' ? 4 + rr * 3 : 8 + rr * 6;
       G.box(o, yaw, 0, h / 2, 0, W / 2, h / 2, L / 2, C.stone); G.box(o, yaw, 0, h + 0.5, 0, W / 2 + 0.2, 0.5, L / 2 + 0.2, [0.3, 0.27, 0.24, LYR(3)]); return;
     }
-    const lake = b.patch === 'garda' || b.patch === 'bolzano', modern = modernTown(b, rr, L, W);
+    // Older OSM exports call many unclassified, long Bolzano footprints "hotel".
+    // Read them as attached street blocks instead of one implausible uniform slab.
+    if (!b._section && b.patch === 'bolzano' && b.cls === 'hotel' && b.use === 'yes' && !b.name &&
+        L > 28 && W < 25 && L * W > 450) {
+      const n = Math.ceil(L / 19), part = L / n, sn = Math.sin(yaw), cs = Math.cos(yaw);
+      for (let j = 0; j < n; j++) {
+        const z = -L / 2 + (j + 0.5) * part, inset = j % 3 === 1 ? 0.55 : 0;
+        const child = { ...b, _section: true, len: part - 0.12, wid: W - inset,
+          c: [b.c[0] + z * sn, b.c[1] + z * cs], levels: b.levels_explicit ? b.levels : Math.max(2, Math.min(5, (b.levels || 3) + (j % 3 === 1 ? -1 : 0))) };
+        simpleBuilding(child, [o[0] + z * sn, o[1], o[2] + z * cs], yaw, child.len, child.wid,
+          (rr + j * 0.31) % 1);
+      }
+      return;
+    }
+    const lake = b.patch === 'garda' || b.patch === 'bolzano', modern = modernTown(b, rr, L, W), villa = lake && villaTown(b, L, W);
     if (lake && isHall(b)) { hallBuilding(b, o, yaw, L, W, rr); return; }
-    const nf = b.cls === 'hut' ? 1 : b.cls === 'castle' ? 3 : Math.max(2, Math.min(lake && b.cls === 'hotel' ? 6 : 5, b.levels || 2)), Hs = 0.6 + nf * (lake ? 3.1 : 2.9);
+    const nf = b.cls === 'hut' ? 1 : b.cls === 'castle' ? 3 : lake && (b.cls === 'house' || b.cls === 'hotel') ? townFloors(b, rr, L, W) : Math.max(2, Math.min(5, b.levels || 2)), Hs = 0.6 + nf * (lake ? 3.1 : 2.9);
     const pl = lake ? townPlaster(b, rr) : b.cls === 'hut' ? C.woodOld : PLASTER[Math.floor(rr * 11) % 4];
     const facade = b.cls !== 'hut' && b.cls !== 'castle';
+    const roadD = lake && facade ? bRoadDist(b.c[0], b.c[1]) : Infinity;
+    // Near the route, explicit complete bays avoid terrain-relative shader windows
+    // wandering into eaves on sloped plots. Far buildings retain cheap painted bays.
+    const facadeRange = b.patch === 'garda' ? 220 : 140;
+    const alignedWindows = lake && (b.cls === 'house' || b.cls === 'hotel') && L * W < 1400 && roadD < facadeRange;
+    const shop = alignedWindows && shopTown(b, rr, modern, villa, roadD);
     if (b.cls === 'hut' && !lake && barnKind(b) === 'tabla') { G.box(o, yaw, 0, 1.2, 0, W / 2, 1.2, L / 2, C.white); G.box(o, yaw, 0, 2.4 + 1.3, 0, W / 2 - 0.03, 1.3, L / 2 - 0.03, C.woodOld); G.roof(o, yaw, 5.0, W, L, W * 0.55, 0.8, C.shingle, C.woodOld); return; }
-    G.box(o, yaw, 0, Hs / 2, 0, W / 2, Hs / 2, L / 2, b.cls === 'castle' ? C.stone : b.cls === 'hut' ? (lake ? pl : C.woodOld) : facade ? [pl[0], pl[1], pl[2], lake ? 1.5 : 1.75] : pl);
+    G.box(o, yaw, 0, Hs / 2, 0, W / 2, Hs / 2, L / 2, b.cls === 'castle' ? C.stone : b.cls === 'hut' ? (lake ? pl : C.woodOld) : facade ? [pl[0], pl[1], pl[2], alignedWindows ? LYR(2) : lake ? 1.5 : 1.75] : pl);
     if (lake && facade) {
+      if (alignedWindows) {
+        // Place complete bays with a margin on every wall. The distant world-space painted pattern could cut windows at corners.
+        const cy = Math.cos(yaw), sy = Math.sin(yaw);
+        const P = (x, y, z) => [o[0] + x * cy + z * sy, o[1] + y, o[2] - x * sy + z * cy];
+        const pane = (sideX, sg, u, y, hw, hh, out, color) => {
+          const wall = sg * ((sideX ? W : L) / 2 + out);
+          if (sideX) G.quad(P(wall, y - hh, u + sg * hw), P(wall, y - hh, u - sg * hw), P(wall, y + hh, u - sg * hw), P(wall, y + hh, u + sg * hw), [sg * cy, 0, -sg * sy], color);
+          else G.quad(P(u - sg * hw, y - hh, wall), P(u + sg * hw, y - hh, wall), P(u + sg * hw, y + hh, wall), P(u - sg * hw, y + hh, wall), [sg * sy, 0, sg * cy], color);
+        };
+        for (let f = 0; f < nf; f++) {
+          const y = 0.6 + f * 3.1 + 1.6;
+          for (const face of ['x+', 'x-', 'z+', 'z-']) {
+            const sideX = face[0] === 'x', sg = face[1] === '+' ? 1 : -1, span = sideX ? L : W;
+            const n = Math.min(12, Math.max(1, Math.floor((span - 1.5) / 3.3)));
+            for (let i = 0; i < n; i++) {
+              if (f === 0 && face === 'x+' && i === Math.floor(n / 2)) continue; // entrance
+              const u = -span / 2 + (i + 0.5) * span / n;
+              if (shop && f === 0 && sideX) {
+                pane(sideX, sg, u, 1.75, 0.98, 1.05, 0.04, C.win);
+              } else {
+                pane(sideX, sg, u, y, modern ? 0.65 : 0.53, 0.69, 0.03, FRAME_W);
+                pane(sideX, sg, u, y, modern ? 0.55 : 0.43, 0.58, 0.06, C.win);
+              }
+              if (!modern && f > 0 && (b.patch === 'garda' || villa || rr < 0.45)) {
+                const shutter = SHUTTER[Math.floor(rr * 7) % SHUTTER.length];
+                for (const s of [-1, 1]) pane(sideX, sg, u + s * 0.67, y, 0.17, 0.66, 0.045, shutter);
+              }
+            }
+          }
+        }
+      }
+      if (shop) G.box(o, yaw, W / 2 + 0.45, 3.08, 0, 0.48, 0.08, L / 2 - 0.35, townRoof(rr));
       if (modern) {
         G.box(o, yaw, 0, Hs + 0.12, 0, W / 2 + 0.3, 0.12, L / 2 + 0.3, townRoof(rr));
         for (const sd of [-1, 1]) {
           G.box(o, yaw, sd * (W / 2 + 0.2), Hs + 0.42, 0, 0.12, 0.3, L / 2 + 0.3, FRAME_W);
           G.box(o, yaw, 0, Hs + 0.42, sd * (L / 2 + 0.2), W / 2 + 0.3, 0.3, 0.12, FRAME_W);
         }
-        if (bRoadDist(b.c[0], b.c[1]) < 240) for (let f = 1; f < nf; f++) for (const sd of [-1, 1]) {
+        if (roadD < 240) for (let f = 1; f < nf; f++) for (const sd of [-1, 1]) {
           const y = 0.6 + f * 3.1;
           G.box(o, yaw, sd * (W / 2 + 0.48), y - 0.06, 0, 0.48, 0.06, L * 0.36, C.stone);
           G.box(o, yaw, sd * (W / 2 + 0.92), y + 0.5, 0, 0.025, 0.5, L * 0.36, C.steel);
         }
-      } else G.hip(o, yaw, Hs, W, L, roofRise(W), 0.55, townRoof(rr));
+      } else if (villa) G.roof(o, yaw, Hs, W, L, W * 0.28, 0.85, townRoof(rr), pl);
+      else G.hip(o, yaw, Hs, W, L, roofRise(W), 0.55, townRoof(rr));
+      if (b.patch === 'garda' && b.use === 'apartments' && !modern && nf >= 3 &&
+          L * W < 700 && roadD < 180) {
+        // One small iron balcony on each long facade reads at street distance.
+        const y = 0.6 + 3.1, half = Math.min(1.8, L * 0.14);
+        for (const sd of [-1, 1]) {
+          G.box(o, yaw, sd * (W / 2 + 0.45), y - 0.06, 0, 0.45, 0.06, half, C.stone);
+          G.box(o, yaw, sd * (W / 2 + 0.87), y + 0.95, 0, 0.035, 0.035, half + 0.05, C.steel);
+          for (let k = -3; k <= 3; k++) G.box(o, yaw, sd * (W / 2 + 0.87), y + 0.48,
+            k * half / 3, 0.018, 0.47, 0.018, C.steel);
+        }
+      }
+      if (b.patch === 'garda' && !modern && roadD < 180 && rr < 0.7) {
+        const rise = villa ? W * 0.28 : roofRise(W);
+        G.box(o, yaw, -W * 0.17, Hs + rise * 0.55 + 0.5, L * 0.22,
+          0.26, 0.8, 0.26, C.plaster);
+      }
+      if (villa && roadD < 180) {
+        G.box(o, yaw, W / 2 + 0.45, 3.62, 0, 0.48, 0.07, Math.min(3.8, L * 0.27), C.stone);
+        G.box(o, yaw, W / 2 + 0.9, 4.17, 0, 0.035, 0.52, Math.min(3.8, L * 0.27), C.steel);
+      }
       // Readable silhouettes between full-detail cells: plinth, cornice and entrance.
-      if (b.patch === 'garda' && L * W < 1000 && bRoadDist(b.c[0], b.c[1]) < 240) {
+      if (L * W < 1400 && roadD < facadeRange) {
         G.box(o, yaw, 0, 0.4, 0, W / 2 + 0.06, 0.4, L / 2 + 0.06, C.stone);
         G.box(o, yaw, 0, Hs - 0.12, 0, W / 2 + 0.16, 0.12, L / 2 + 0.16, FRAME_W);
         G.box(o, yaw, 0, 3.6, 0, W / 2 + 0.06, 0.07, L / 2 + 0.06, FRAME_W);
@@ -2024,7 +2153,7 @@ void main() {
   function fullBuilding(b, o, yaw, L, W) {
     const h1 = (b.c[0] * 7.1 + b.c[1] * 3.7) % 1, rr = Math.abs(h1);
     flowerSeed = 1 + Math.floor(rr * 1e6);
-    const lakeStyle = b.patch === 'garda' || b.patch === 'bolzano', modern = modernTown(b, rr, L, W);
+    const lakeStyle = b.patch === 'garda' || b.patch === 'bolzano', modern = modernTown(b, rr, L, W), villa = lakeStyle && villaTown(b, L, W);
     const shut = SHUTTER[Math.floor(rr * 7) % 3], plaster = lakeStyle ? townPlaster(b, rr) : PLASTER[Math.floor(rr * 11) % 4];
     const winRow = (yb, h, w, opt, faces = ['x+', 'x-']) => {
       for (const f of faces) { const len = f[0] === 'x' ? L : W, n = Math.max(1, Math.floor((len - 1.2) / (opt.spacing || 2.6)));
@@ -2103,11 +2232,11 @@ void main() {
       // lake towns (Riva, Torbole, Arco, the Adige villages): pastel plaster to the eaves, white window surrounds, green or brown
       // persiane on every window, a stone plinth and string course, shopfronts with striped awnings on the street, small iron balconies
       // on the piano nobile, a cornice and a low hipped terracotta roof
-      const nf = Math.max(2, Math.min(b.cls === 'hotel' ? 6 : 5, b.levels || 3)), fh = 3.1, wallTop = 0.6 + nf * fh;
+      const nf = townFloors(b, rr, L, W), fh = 3.1, wallTop = 0.6 + nf * fh;
       const IRON = [0.03, 0.03, 0.03, LYR(5)], WHITE = [0.6, 0.58, 0.53, LYR(2)], AW = [[0.4, 0.06, 0.05], [0.07, 0.2, 0.12], [0.08, 0.12, 0.3], [0.45, 0.3, 0.06]][Math.floor(rr * 17) % 4];
-      const shopStreet = bRoadDist(b.c[0], b.c[1]) < 25;
+      const shopStreet = shopTown(b, rr, modern, villa, bRoadDist(b.c[0], b.c[1]));
       const persiane = [[0.05, 0.16, 0.08], [0.09, 0.2, 0.12], [0.16, 0.09, 0.04], [0.32, 0.3, 0.27]][Math.floor(rr * 23) % 4];
-      G.box(o, yaw, 0, 0.6 + (nf * fh) / 2 - 0.3, 0, W / 2, (nf * fh) / 2, L / 2, plaster);
+      G.box(o, yaw, 0, 0.6 + (nf * fh) / 2, 0, W / 2, (nf * fh) / 2, L / 2, plaster);
       G.box(o, yaw, 0, 0.55, 0, W / 2 + 0.07, 0.55, L / 2 + 0.07, C.stone);                                   // plinth
       G.box(o, yaw, 0, 0.6 + fh - 0.1, 0, W / 2 + 0.06, 0.1, L / 2 + 0.06, WHITE);                           // string course
       G.box(o, yaw, 0, wallTop - 0.15, 0, W / 2 + 0.18, 0.15, L / 2 + 0.18, WHITE);                           // cornice
@@ -2115,17 +2244,18 @@ void main() {
         const yb = 0.6 + f * fh + 0.9;
         if (f === 0 && shopStreet) {
           for (const fc of ['x+', 'x-']) { const n = Math.max(1, Math.floor((L - 1) / 4.2));
-            for (let i = 0; i < n; i++) { const u = -L / 2 + (i + 0.5) * L / n, sg = fc[1] === '+' ? 1 : -1;
+            for (let i = 0; i < n; i++) { if (fc === 'x+' && i === Math.floor(n / 2)) continue; const u = -L / 2 + (i + 0.5) * L / n, sg = fc[1] === '+' ? 1 : -1;
               G.box(o, yaw, sg * (W / 2 + 0.02), 1.75, u, 0.05, 1.15, 1.45, GLASS);                            // shop window
               G.box(o, yaw, sg * (W / 2 + 0.06), 2.95, u, 0.04, 0.05, 1.55, IRON);
               // striped awning: a sloped plane out to 1.4 m
               const T2 = (x, y, z) => { const c = Math.cos(yaw), s2 = Math.sin(yaw); return [o[0] + x * c + z * s2, o[1] + y, o[2] - x * s2 + z * c]; };
-              for (let k = 0; k < 6; k++) { const z0 = u - 1.5 + k * 0.5, z1 = z0 + 0.5, kk = k % 2 ? [0.62, 0.6, 0.55, LYR(2)] : [AW[0], AW[1], AW[2], LYR(2)];
+              const awHalf = Math.min(1.5, L / n * 0.42), awStep = awHalf / 3;
+              for (let k = 0; k < 6; k++) { const z0 = u - awHalf + k * awStep, z1 = z0 + awStep, kk = k % 2 ? [0.62, 0.6, 0.55, LYR(2)] : [AW[0], AW[1], AW[2], LYR(2)];
                 G.quad(T2(sg * (W / 2 + 0.05), 3.25, z0), T2(sg * (W / 2 + 0.05), 3.25, z1), T2(sg * (W / 2 + 1.45), 2.6, z1), T2(sg * (W / 2 + 1.45), 2.6, z0), [0, 1, 0], kk);
                 G.quad(T2(sg * (W / 2 + 1.45), 2.6, z0), T2(sg * (W / 2 + 1.45), 2.6, z1), T2(sg * (W / 2 + 1.45), 2.35, z1), T2(sg * (W / 2 + 1.45), 2.35, z0), [sg * Math.cos(yaw), 0, -sg * Math.sin(yaw)], kk); } } }
           winRow(yb, 1.5, 1.0, { frame: WHITE, shutters: persiane, spacing: 3.0 }, ['z+', 'z-']);
         } else {
-          winRow(yb, f === 0 ? 1.2 : 1.55, f === 0 ? 0.8 : 1.0, { frame: WHITE, shutters: f === 0 ? null : persiane, sill: WHITE, flowers: f === 1 && rr < 0.32, spacing: 3.0,
+          winRow(yb, f === 0 ? 1.2 : 1.55, f === 0 ? 0.8 : modern ? 1.28 : 1.0, { frame: WHITE, shutters: f === 0 || modern ? null : persiane, sill: WHITE, flowers: !modern && f === 1 && rr < 0.32, spacing: modern ? 3.5 : 3.0,
             skip: (fc, i, n) => f === 0 && fc === 'x+' && i === Math.floor(n / 2) }, ['x+', 'x-', 'z+', 'z-']);
         }
         if (modern && f > 0) for (const sd of [-1, 1]) {      // newer lakeside and Adige apartment blocks: long open balconies
@@ -2134,7 +2264,7 @@ void main() {
           G.box(o, yaw, sd * (W / 2 + 1.05), y + 0.48, 0, 0.025, 0.48, L * 0.38, IRON);
           G.box(o, yaw, sd * (W / 2 + 1.05), y + 0.98, 0, 0.04, 0.04, L * 0.38, IRON);
         }
-        if (!modern && f === 1) for (const sd of [-1, 1]) {          // a small iron balcony in the middle of each long side
+        if (!modern && !villa && f === 1) for (const sd of [-1, 1]) { // old-town iron balconies
           G.box(o, yaw, sd * (W / 2 + 0.45), 0.6 + fh - 0.05, 0, 0.45, 0.07, 1.0, C.stone);
           G.box(o, yaw, sd * (W / 2 + 0.88), 0.6 + fh + 1.0, 0, 0.035, 0.035, 1.04, IRON);
           for (let k = -4; k <= 4; k++) G.box(o, yaw, sd * (W / 2 + 0.88), 0.6 + fh + 0.5, k * 0.25, 0.018, 0.5, 0.018, IRON);
@@ -2144,7 +2274,8 @@ void main() {
           }
         }
       }
-      if (!shopStreet) door(o, yaw, W, L, 'x+', 0, C.wood);
+      if (villa) balcony(o, yaw, W, L, 1, 0.6 + fh, Math.min(7, L * 0.7), 0.9, { flowers: rr < 0.5 });
+      door(o, yaw, W, L, 'x+', 0, C.wood);
       if (rr < 0.45) for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
         G.box(o, yaw, sx * (W / 2 - 0.12), wallTop / 2, sz * (L / 2 - 0.12), 0.16, wallTop / 2, 0.16, WHITE);
       }
@@ -2154,6 +2285,9 @@ void main() {
           G.box(o, yaw, sd * (W / 2 + 0.2), wallTop + 0.42, 0, 0.12, 0.3, L / 2 + 0.3, WHITE);
           G.box(o, yaw, 0, wallTop + 0.42, sd * (L / 2 + 0.2), W / 2 + 0.3, 0.3, 0.12, WHITE);
         }
+      } else if (villa) {
+        G.roof(o, yaw, wallTop, W, L, W * 0.28, 0.85, townRoof(rr), plaster);
+        chimney(o, yaw, -W * 0.18, L * 0.25, wallTop + W * 0.17);
       } else {
         G.hip(o, yaw, wallTop, W, L, roofRise(W), 0.7, townRoof(rr));
         chimney(o, yaw, -W * 0.15, L * 0.25, wallTop + roofRise(W) * 0.6);
@@ -4575,6 +4709,7 @@ void main() {
   mark('before release'); releaseGeometry(); mark('released');
   if (!QS.has('nowarmup')) {
     const gl = engine._gl, t0w = performance.now();
+    const warmupProfile = window.__warmupProfile = [];
     const fenceWait = async () => { const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
       while (gl.getSyncParameter(f, gl.SYNC_STATUS) !== gl.SIGNALED) await new Promise((r) => setTimeout(r, 4)); gl.deleteSync(f); };
     const step = (t) => { statusEl.hidden = false; statusEl.textContent = 'Preparing shaders… ' + t; };
@@ -4585,28 +4720,35 @@ void main() {
       // disabled meshes too (tunnels switch on near their portals): their first draw mid-drive cost 142 ms
       const m = mats[i], meshes = scene.meshes.filter((x) => x.material === m && x.getTotalVertices() > 0);
       if (!meshes.length) continue;
+      const matStart = performance.now();
       const off = meshes.filter((x) => !x.isEnabled()); off.forEach((x) => x.setEnabled(true));
       step(`${i + 1}/${mats.length}`);
       const rt = new BABYLON.RenderTargetTexture('warmup', 8, scene, false); rt.activeCamera = cam; rt.renderList = meshes; rt.renderParticles = false; rt.renderSprites = false;
       for (let k = 0; k < 200 && !rt.isReadyForRendering(); k++) await new Promise((r) => setTimeout(r, 10));
       rt.render(); await fenceWait(); rt.dispose(); off.forEach((x) => x.setEnabled(false));
       await new Promise((r) => requestAnimationFrame(() => r()));
+      warmupProfile.push([m.name, Math.round(performance.now() - matStart), meshes.length]);
     }
     // the complete frame (post-processing, SSAO, probes, every pass) on a tiny canvas. Materials whose meshes are all out of view
     // (tunnels) would build their main-pass pipeline mid-drive (152 ms): the smallest mesh of each is drawn regardless of the frustum
     const forced = [];
     for (const m of mats) { const ms = scene.meshes.filter((x) => x.material === m && x.getTotalVertices() > 0 && x.isEnabled()).sort((a, b) => a.getTotalVertices() - b.getTotalVertices()); if (ms.length && !ms[0].alwaysSelectAsActiveMesh) { ms[0].alwaysSelectAsActiveMesh = true; forced.push(ms[0]); } }
     const canvas = engine.getRenderingCanvas(), css = [canvas.style.width, canvas.style.height];
-    for (const [w, h, label] of [[64, 40, 'frame 1/3'], [64, 40, 'frame 2/3'], [160, 100, 'frame 3/3']]) {
+    // One tiny first frame compiles the complete render path; the second, larger frame verifies it.
+    // Repeating the same 64 x 40 frame added load time without warming a new pipeline.
+    for (const [w, h, label] of [[64, 40, 'frame 1/2'], [160, 100, 'frame 2/2']]) {
+      const frameStart = performance.now();
       step(label); canvas.style.width = w + 'px'; canvas.style.height = h + 'px'; engine.setSize(w, h);
       for (let q = 0; q < 300 && !scene.isReady(); q++) await new Promise((r) => setTimeout(r, 10));
       scene.render(); await fenceWait();
       await new Promise((r) => requestAnimationFrame(() => r()));
+      warmupProfile.push([label, Math.round(performance.now() - frameStart)]);
     }
     canvas.style.width = css[0]; canvas.style.height = css[1]; engine.resize();
     for (const x of forced) x.alwaysSelectAsActiveMesh = false;
     console.log('shader warm-up', Math.round(performance.now() - t0w), 'ms');
     window.__warmupMs = Math.round(performance.now() - t0w);
+    mark('warmup complete');
   }
   if (QS.has('diag')) { window.__diagHook = { scene, engine, setShot, SHOTS, ROUTE_PTS, tier: tierName, readyMs: Math.round(performance.now()) }; await runDiag(); return; }      // the hook lets tools/perf_bench.js time views after the diag
   // ---------- ?diag: one-shot GPU hang diagnosis ----------

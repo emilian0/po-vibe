@@ -26,7 +26,7 @@ Landscape is recommended. Add &touch to the game URL to preview touch controls o
 
 Touch input and layouts are browser-tested; real-device mobile performance testing is still needed.
 No analytics is configured.
-Libraries and fonts require internet access. The Alfa-only asset collection is approximately 167 MB;
+Libraries and fonts require internet access. The Alfa-only distribution is approximately 275 MB;
 a play session downloads only the assets it requests.
 
 release.json identifies the source revision. Make changes in the source repository and export
