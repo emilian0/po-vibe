@@ -51,7 +51,10 @@
   }
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
-  const fail = (t) => { statusEl.hidden = false; statusEl.textContent = t; window.__err = window.__err || t; };      // __err: the test runner stops at once
+  const fail = (t) => {
+    if (window.__webgpuFallback && !window.__err) { window.__webgpuFallback(t); return; }
+    statusEl.hidden = false; statusEl.textContent = t; window.__err = window.__err || t;
+  };      // __err: the test runner stops at once
   window.addEventListener('error', (e) => fail('Something went wrong: ' + (e.message || 'unknown error')));
   window.addEventListener('unhandledrejection', (e) => fail('Something went wrong while loading: ' + ((e.reason && e.reason.message) || e.reason || 'unknown error')));
   const QS = new URLSearchParams(location.search);
@@ -249,10 +252,23 @@ bool inTunnelMouth(vec3 p) {
 
   // ---------- engine ----------
   const canvas = $('c');
-  // The corridor can opt into WebGPU while its backend-specific texture and shadow paths are ported.
+  // Use WebGPU when available; WebGL2 remains the fallback and &webgl forces it.
   // doNotHandleContextLost: Babylon otherwise keeps a CPU copy of every texture and vertex buffer to rebuild them after a lost
   // GPU context (about 400 MB here, part of what crashed phone and Safari tabs while loading). A lost context now asks for a reload.
-  const WEBGPU = QS.has('webgpu');
+  let blockedWebGPU = false;
+  try { blockedWebGPU = !!sessionStorage.getItem('doloForceWebGL'); } catch (_) {}
+  if (window.__prevCrumb?.renderer === 'WebGPU' && window.__prevCrumb.s !== 'ok') blockedWebGPU = true;
+  const WEBGPU = QS.has('webgpu') || (!QS.has('webgl') && !blockedWebGPU && !!navigator.gpu);
+  CRUMB.ctx.renderer = WEBGPU ? 'WebGPU' : 'WebGL2'; CRUMB.set('initializing renderer');
+  let fallbackStarted = false;
+  const webglFallback = (why) => {
+    if (fallbackStarted) return;
+    fallbackStarted = true;
+    console.warn('WebGPU failed; restarting with WebGL2', why);
+    try { sessionStorage.setItem('doloForceWebGL', String(why).slice(0, 200)); } catch (_) {}
+    const u = new URL(location.href); u.searchParams.delete('webgpu'); u.searchParams.set('webgl', ''); location.replace(u.href);
+  };
+  if (WEBGPU) window.__webgpuFallback = webglFallback;
   let engine;
   if (WEBGPU) {
     try {
@@ -260,15 +276,12 @@ bool inTunnelMouth(vec3 p) {
       engine = new BABYLON.WebGPUEngine(canvas, { antialias: true, powerPreference: 'high-performance', adaptToDeviceRatio: false,
         doNotHandleContextLost: true, deviceDescriptor: { requiredFeatures: ['texture-compression-astc', 'texture-compression-bc', 'texture-compression-etc2'] } });
       await engine.initAsync();
-    } catch (e) {
-      console.warn('WebGPU setup failed; restarting with WebGL', e);
-      const u = new URL(location.href); u.searchParams.delete('webgpu'); location.replace(u.href); return;
-    }
+    } catch (e) { webglFallback(e); return; }
     engine._device.addEventListener('uncapturederror', (e) => {
-      if (!window.__err) fail('WebGPU validation: ' + String(e.error?.message || e.error || e).slice(0, 280));
+      if (!window.__err) webglFallback('WebGPU validation: ' + String(e.error?.message || e.error || e).slice(0, 280));
     });
   } else engine = new BABYLON.Engine(canvas, true, { stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: QS.has('shot'), doNotHandleContextLost: true }, true);
-  engine.onContextLostObservable.add(() => fail('The graphics context was lost (often low memory). Please reload the page.'));
+  engine.onContextLostObservable.add(() => WEBGPU ? webglFallback('graphics context lost') : fail('The graphics context was lost (often low memory). Please reload the page.'));
   engine.useReverseDepthBuffer = true;
   // ---------- quality tier: a short GPU benchmark at load picks it (?quality=low|medium|high|ultra overrides); resolution then adapts ----------
   const DPR = Math.min(window.devicePixelRatio || 1, 2);
@@ -1037,8 +1050,7 @@ void main() {
   // scissor) and is copied into its layer at once.
   const shArr = (() => {
     if (WEBGPU) {
-      // Until the tiled shadow pass is ported, keep the shader's array sampler valid.
-      // White means unoccluded sunlight; the WebGL route remains unchanged.
+      // The jobs fill this gradually after load; white is the safe initial value.
       const white = new Uint8Array(S_WIN * S_WIN * GNL).fill(255);
       const bt = new BABYLON.RawTexture2DArray(white, S_WIN, S_WIN, GNL, BABYLON.Constants.TEXTUREFORMAT_RED, scene, false, false, BABYLON.Texture.BILINEAR_SAMPLINGMODE);
       bt.wrapU = bt.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
@@ -1073,7 +1085,7 @@ void main() {
   }
   let shadowReadFb = null;
   const runShadowJob = (j) => {
-    if (WEBGPU && !QS.has('wgpushadows')) return;
+    if (WEBGPU && QS.has('nowgpushadows')) return;
     const gl = engine._gl, pt = shadowPT, L = GLV[j.li], o = TSTREAM && L.win ? TSTREAM.target(L) : [0, 0];
     pt.setVector4('thisL', new BABYLON.Vector4(L.cx, L.cz, L.half, L.res)); pt.setVector4('thisW', new BABYLON.Vector4(o[0], o[1], S_WIN, L.win ? 1 : 0));
     pt.setFloat('cheap', j.cheap); pt.tile_ = j.tile; pt.render();
@@ -1094,14 +1106,15 @@ void main() {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead); engine.resetTextureCache();
   };
   // a streamed tile gets its shadow at full quality right away (its window texels held another tile's shadow)
-  if (TSTREAM && (!WEBGPU || (QS.has('wgpushadows') && QS.get('wgpushadows') !== 'single'))) TSTREAM.onTile = (L, tx, ty) => { if (!L.win) return; const T = TILES.T; shadowJobs.push({ li: L.i, tile: [(tx * T) % S_WIN, (ty * T) % S_WIN, T, T], cheap: 0, px: T * T }); };
+  if (TSTREAM && (!WEBGPU || (!QS.has('nowgpushadows') && !['single', 'manual'].includes(QS.get('wgpushadows'))))) TSTREAM.onTile = (L, tx, ty) => { if (!L.win) return; const T = TILES.T; shadowJobs.push({ li: L.i, tile: [(tx * T) % S_WIN, (ty * T) % S_WIN, T, T], cheap: 0, px: T * T }); };
   // terrain shadows are rendered in pieces: one cheap full-layer pass per level, then 256 px tiles at full quality, a pixel budget
   // per frame. No single GPU submission is ever a whole 2048 px ray-march (that stalled the GPU for seconds).
-  const SHADOW_TILE = 256, SHADOW_BUDGET = QS.has('shadowbudget') ? +QS.get('shadowbudget') : 2 * 256 * 256;
+  const SHADOW_TILE = 256, SHADOW_BUDGET = QS.has('shadowbudget') ? +QS.get('shadowbudget') : (WEBGPU ? 256 * 256 : 2 * 256 * 256);
   let shadowDirty = true, shadowJobs = [];
   const refreshShadows = () => {
-    if (WEBGPU && !QS.has('wgpushadows')) { shadowJobs = []; shadowDirty = false; return; }
+    if (WEBGPU && QS.has('nowgpushadows')) { shadowJobs = []; shadowDirty = false; return; }
     const s = LIGHT.sunDir; shadowPT.setVector3('sunDir', new V3(s[0], s[1], s[2])); shadowPT.setFloat('pen', P.penumbra);
+    if (WEBGPU && QS.get('wgpushadows') === 'manual') { shadowJobs = []; shadowDirty = false; return; }
     if (WEBGPU && QS.get('wgpushadows') === 'single') { shadowJobs = [{ li: 0, tile: null, cheap: 1, px: S_WIN * S_WIN / 16 }]; shadowDirty = false; return; }
     shadowJobs = [];
     if (QS.has('shadowold')) {      // comparison only: every level at full quality in one frame, as before
@@ -1413,12 +1426,21 @@ void main() {
       vec3 bw = pow(abs(N), vec3(4.0)); bw /= dot(bw, vec3(1.0));
       float sc = layerScale[0];
       vec3 P = vec3(xz.x, alt, xz.y) / sc;
-      vec3 ax = pow(texture(texAlb, vec3(P.zy * vec2(1.0, -1.0), 0.0)).rgb, vec3(2.2)), ay = pow(texture(texAlb, vec3(P.xz, 0.0)).rgb, vec3(2.2)), az = pow(texture(texAlb, vec3(P.xy * vec2(1.0, -1.0), 0.0)).rgb, vec3(2.2));
-      vec3 nx = texture(texNH, vec3(P.zy * vec2(1.0, -1.0), 0.0)).rgb, ny = texture(texNH, vec3(P.xz, 0.0)).rgb, nz = texture(texNH, vec3(P.xy * vec2(1.0, -1.0), 0.0)).rgb;
+      vec3 dPx = vec3(dPosX.x, dPosX.y * INV_S, dPosX.z) / sc, dPy = vec3(dPosY.x, dPosY.y * INV_S, dPosY.z) / sc;
+      vec2 flip = vec2(1.0, -1.0);
+      vec3 ax = pow(textureGrad(texAlb, vec3(P.zy * flip, 0.0), dPx.zy * flip, dPy.zy * flip).rgb, vec3(2.2));
+      vec3 ay = pow(textureGrad(texAlb, vec3(P.xz, 0.0), dPx.xz, dPy.xz).rgb, vec3(2.2));
+      vec3 az = pow(textureGrad(texAlb, vec3(P.xy * flip, 0.0), dPx.xy * flip, dPy.xy * flip).rgb, vec3(2.2));
+      vec3 nx = textureGrad(texNH, vec3(P.zy * flip, 0.0), dPx.zy * flip, dPy.zy * flip).rgb;
+      vec3 ny = textureGrad(texNH, vec3(P.xz, 0.0), dPx.xz, dPy.xz).rgb;
+      vec3 nz = textureGrad(texNH, vec3(P.xy * flip, 0.0), dPx.xy * flip, dPy.xy * flip).rgb;
       vec3 a = ax * bw.x + ay * bw.y + az * bw.z;
       // a coarser triplanar for the large forms of the walls
       vec3 Q = P / 6.3;
-      vec3 m2 = pow(texture(texAlb, vec3(Q.zy, 0.0)).rgb, vec3(2.2)) * bw.x + pow(texture(texAlb, vec3(Q.xz, 0.0)).rgb, vec3(2.2)) * bw.y + pow(texture(texAlb, vec3(Q.xy, 0.0)).rgb, vec3(2.2)) * bw.z;
+      vec3 qx = dPx / 6.3, qy = dPy / 6.3;
+      vec3 m2 = pow(textureGrad(texAlb, vec3(Q.zy, 0.0), qx.zy, qy.zy).rgb, vec3(2.2)) * bw.x
+        + pow(textureGrad(texAlb, vec3(Q.xz, 0.0), qx.xz, qy.xz).rgb, vec3(2.2)) * bw.y
+        + pow(textureGrad(texAlb, vec3(Q.xy, 0.0), qx.xy, qy.xy).rgb, vec3(2.2)) * bw.z;
       a *= clamp(m2 / max(layerMean[0], vec3(0.01)), 0.45, 1.7);
       // (the bedded-rock scan was dropped: its layers tiled into regular horizontal rows; the lower tiers are a tint below)
       albL[0] = mix(layerTint[0], a * layerGain[0], tfade);
@@ -1743,6 +1765,7 @@ void main() { vec4 w = world * vec4(position, 1.0); vPos = w.xyz + floatO; vN = 
 uniform highp sampler2DArray propAlb; uniform highp sampler2DArray propNH; uniform vec3 propMean[6]; uniform float propScale[6];
 varying vec3 vPos; varying vec3 vN; varying vec4 vCol;
 void main() {
+  vec3 dPosX = dFdx(vPos), dPosY = dFdy(vPos);
   vec3 N = normalize(vN);
   if (dot(N, camPos - vPos) < 0.0 && abs(N.y) < 0.9) N = -N;      // seen from inside a wall: light the side we see
   float n = vnoise(vPos.xy * 3.1 + vPos.zy * 2.3) * 0.5 + vnoise(vPos.xz * 9.0) * 0.5;
@@ -1781,9 +1804,16 @@ void main() {
     int li = int(vCol.a * 8.0); float layer = float(li);
     vec3 bw = pow(abs(N), vec3(6.0)); bw /= dot(bw, vec3(1.0));
     vec3 P = vPos / propScale[li];
+    vec3 dPX = dPosX / propScale[li], dPY = dPosY / propScale[li];
     vec2 ux = vec2(P.z, -P.y), uy = P.xz, uz = vec2(P.x, -P.y);
-    vec3 a = pow(texture(propAlb, vec3(ux, layer)).rgb, vec3(2.2)) * bw.x + pow(texture(propAlb, vec3(uy, layer)).rgb, vec3(2.2)) * bw.y + pow(texture(propAlb, vec3(uz, layer)).rgb, vec3(2.2)) * bw.z;
-    vec2 tx = texture(propNH, vec3(ux, layer)).rg * 2.0 - 1.0, ty = texture(propNH, vec3(uy, layer)).rg * 2.0 - 1.0, tz = texture(propNH, vec3(uz, layer)).rg * 2.0 - 1.0;
+    vec2 dx = vec2(dPX.z, -dPX.y), dy = vec2(dPY.z, -dPY.y);
+    vec2 zx = vec2(dPX.x, -dPX.y), zy = vec2(dPY.x, -dPY.y);
+    vec3 a = pow(textureGrad(propAlb, vec3(ux, layer), dx, dy).rgb, vec3(2.2)) * bw.x
+      + pow(textureGrad(propAlb, vec3(uy, layer), dPX.xz, dPY.xz).rgb, vec3(2.2)) * bw.y
+      + pow(textureGrad(propAlb, vec3(uz, layer), zx, zy).rgb, vec3(2.2)) * bw.z;
+    vec2 tx = textureGrad(propNH, vec3(ux, layer), dx, dy).rg * 2.0 - 1.0;
+    vec2 ty = textureGrad(propNH, vec3(uy, layer), dPX.xz, dPY.xz).rg * 2.0 - 1.0;
+    vec2 tz = textureGrad(propNH, vec3(uz, layer), zx, zy).rg * 2.0 - 1.0;
     N = normalize(N + (vec3(0.0, -tx.y, tx.x) * bw.x + vec3(ty.x, 0.0, ty.y) * bw.y + vec3(tz.x, -tz.y, 0.0) * bw.z) * 0.8);
     alb = a * vCol.rgb / max(propMean[li], vec3(0.01)) * (0.9 + 0.2 * n);
   }
@@ -2925,10 +2955,13 @@ void main() {
 uniform highp sampler2DArray texAlb; uniform vec3 rockGain;
 varying vec3 vPos; varying vec3 vN; varying float vLocalY;
 void main() {
+  vec3 dPX = dFdx(vPos) / 3.0, dPY = dFdy(vPos) / 3.0;
   vec3 N = normalize(vN);
   vec3 bw = pow(abs(N), vec3(4.0)); bw /= dot(bw, vec3(1.0));
   vec3 P = vPos / 3.0;
-  vec3 a = pow(texture(texAlb, vec3(P.zy, 0.0)).rgb, vec3(2.2)) * bw.x + pow(texture(texAlb, vec3(P.xz, 0.0)).rgb, vec3(2.2)) * bw.y + pow(texture(texAlb, vec3(P.xy, 0.0)).rgb, vec3(2.2)) * bw.z;
+  vec3 a = pow(textureGrad(texAlb, vec3(P.zy, 0.0), dPX.zy, dPY.zy).rgb, vec3(2.2)) * bw.x
+    + pow(textureGrad(texAlb, vec3(P.xz, 0.0), dPX.xz, dPY.xz).rgb, vec3(2.2)) * bw.y
+    + pow(textureGrad(texAlb, vec3(P.xy, 0.0), dPX.xy, dPY.xy).rgb, vec3(2.2)) * bw.z;
   vec3 alb = a * rockGain * (0.85 + 0.3 * hash12(floor(vPos.xz * 0.2)));
   // lichen and dirt: greener on top, darker where it sits in the grass
   alb = mix(alb, alb * vec3(0.8, 0.9, 0.7), smoothstep(0.3, 0.9, N.y) * 0.4);
@@ -3324,6 +3357,7 @@ uniform sampler2D waterTex; uniform highp sampler2DArray texAlb; uniform vec3 st
 // vUV: across (0 to 1) and along (m), vFlowW: slope (drop per metre) and width (m), vFade: 0 where the water ends (culverts)
 varying vec3 vPos; varying vec2 vUV; varying vec2 vFlowW; varying float vFade;
 void main() {
+  vec2 dXZx = dFdx(vPos.xz), dXZy = dFdy(vPos.xz);
   float slope = vFlowW.x, w = vFlowW.y, a = abs(vUV.x - 0.5) * 2.0, depthF = 1.0 - a * a;
   float speed = 0.45 + clamp(slope, 0.0, 0.4) * 7.0, tt = atm.w;
   vec2 q = vec2(vUV.x * w, vUV.y);
@@ -3340,7 +3374,7 @@ void main() {
   float sh = (sunShadow(vPos.xz) * cloudShade(vPos));
   vec3 lit = (sunCol * max(sunDir.y, 0.0) * sh + ambient(vec3(0.0, 1.0, 0.0))) / PI;
   // the water body: clear over pale stones at the edges, glacial green in the deeper middle (refs 12-14)
-  vec3 bed = pow(texture(texAlb, vec3(vPos.xz / 2.2 + nn * 0.04, 1.0)).rgb, vec3(2.2)) * stoneGain * 0.7;      // the stones under clear water, wobbling with the ripples
+  vec3 bed = pow(textureGrad(texAlb, vec3(vPos.xz / 2.2 + nn * 0.04, 1.0), dXZx / 2.2, dXZy / 2.2).rgb, vec3(2.2)) * stoneGain * 0.7;      // the stones under clear water, wobbling with the ripples
   vec3 deep = vec3(0.022, 0.05, 0.042);
   vec3 body = mix(bed, deep, smoothstep(0.15, 0.95, depthF) * 0.85) * lit;
   // sun glints with normal-variance filtering: where the ripple normals change fast on screen (far, or rough fast water) the
@@ -3373,8 +3407,10 @@ uniform highp sampler2DArray texAlb; uniform vec3 stoneGain; uniform vec3 gravel
 // vUV.x: 0 at the water's middle, 1 at the outer edge of the strip, vFade: 0 where the stream ends
 varying vec3 vPos; varying vec3 vN; varying vec2 vUV; varying float vFade;
 void main() {
+  vec2 dXZx = dFdx(vPos.xz), dXZy = dFdy(vPos.xz);
   vec3 N = normalize(vN);
-  vec3 stones = pow(texture(texAlb, vec3(vPos.xz / 2.2, 1.0)).rgb, vec3(2.2)), gravel = pow(texture(texAlb, vec3(vPos.xz / 1.6 + 0.3, 4.0)).rgb, vec3(2.2));
+  vec3 stones = pow(textureGrad(texAlb, vec3(vPos.xz / 2.2, 1.0), dXZx / 2.2, dXZy / 2.2).rgb, vec3(2.2));
+  vec3 gravel = pow(textureGrad(texAlb, vec3(vPos.xz / 1.6 + 0.3, 4.0), dXZx / 1.6, dXZy / 1.6).rgb, vec3(2.2));
   float e = vUV.x;
   vec3 alb = mix(stones * stoneGain, gravel * gravelGain, smoothstep(0.45, 0.85, e) * (0.35 + 0.4 * vnoise(vPos.xz * 0.6)));      // mostly stones, gravel in patches
   alb *= mix(0.42, 1.0, smoothstep(0.32, 0.6, e));      // wet below and just above the waterline
@@ -3620,7 +3656,7 @@ uniform highp sampler2DArray texAlb; uniform vec3 grassGain;
 varying vec3 vPos; varying vec3 vN; varying vec2 vUV; varying vec2 vU2;
 void main() {
   vec3 N = normalize(vN);
-  vec3 g = pow(texture(texAlb, vec3(vPos.xz / 1.4, 2.0)).rgb, vec3(2.2)) * grassGain;
+  vec3 g = pow(textureGrad(texAlb, vec3(vPos.xz / 1.4, 2.0), dFdx(vPos.xz) / 1.4, dFdy(vPos.xz) / 1.4).rgb, vec3(2.2)) * grassGain;
   float s = vUV.x / 3.2, mowPass = smoothstep(0.4, 0.6, abs(fract(s) - 0.5) * 2.0);      // mower passes: alternating tones
   vec3 alb = g * vec3(1.25, 1.18, 0.78) * mix(0.9, 1.08, mowPass) * (0.92 + 0.16 * vU2.x);
   float row = (1.0 - smoothstep(0.05, 0.16, abs(fract(vUV.x / 6.0 + vU2.x) - 0.5))) * vU2.y * (0.75 + 0.25 * vnoise(vPos.xz * 0.8));
@@ -3640,7 +3676,9 @@ void main() {
   float path = 1.0 - smoothstep(0.55, 0.95, a + wob);
   float ruts = 1.0 - smoothstep(0.12, 0.3, abs(a - 0.55 + wob * 0.4));
   float m = mix(path, ruts, vU2.x);
-  vec3 dirt = pow(texture(texAlb, vec3(vPos.xz / 1.3, 3.0)).rgb, vec3(2.2)) * dirtGain, grav = pow(texture(texAlb, vec3(vPos.xz / 0.9 + 0.4, 4.0)).rgb, vec3(2.2)) * gravelGain;
+  vec2 dXZx = dFdx(vPos.xz), dXZy = dFdy(vPos.xz);
+  vec3 dirt = pow(textureGrad(texAlb, vec3(vPos.xz / 1.3, 3.0), dXZx / 1.3, dXZy / 1.3).rgb, vec3(2.2)) * dirtGain;
+  vec3 grav = pow(textureGrad(texAlb, vec3(vPos.xz / 0.9 + 0.4, 4.0), dXZx / 0.9, dXZy / 0.9).rgb, vec3(2.2)) * gravelGain;
   vec3 alb = mix(dirt, grav, smoothstep(0.4, 0.7, vnoise(vPos.xz * 0.4)) * 0.7);
   float sh = sunShadow(vPos.xz) * cloudShade(vPos);
   vec3 col = alb * (sunCol * max(dot(N, sunDir), 0.0) * sh + ambient(N)) / PI;
@@ -4860,8 +4898,43 @@ void main() {
     window.__warmupMs = Math.round(performance.now() - t0w);
     mark('warmup complete');
   }
-  if (QS.has('diag')) { window.__diagHook = { scene, engine, setShot, SHOTS, ROUTE_PTS, tier: tierName, readyMs: Math.round(performance.now()) }; await runDiag(); return; }      // the hook lets tools/perf_bench.js time views after the diag
+  if (QS.has('diag')) { window.__diagHook = { scene, engine, setShot, SHOTS, ROUTE_PTS, tier: tierName, readyMs: Math.round(performance.now()) }; if (WEBGPU) await runWebGPUDiag(); else await runDiag(); return; }      // the hook lets tools/perf_bench.js time views after the diag
   // ---------- ?diag: one-shot GPU hang diagnosis ----------
+  // WebGPU uses a queue fence after each progressively larger complete frame.
+  // It does not touch WebGL state and stops before enlarging a costly frame.
+  async function runWebGPUDiag() {
+    const report = window.__webgpuDiag = { renderer: 'WebGPU', frames: [], stopped: null, complete: false };
+    const stamp = 'diag-wgpu-' + new Date().toISOString().replace(/[:.]/g, '-');
+    const post = (o) => { try { const x = new XMLHttpRequest(); x.open('POST', '/diag-log?s=' + stamp, false); x.send(JSON.stringify(o)); } catch (_) {} };
+    const finish = () => { report.complete = !report.stopped; window.__diagDone = true;
+      window.__dolo = { frames: 7, engine, scene, stats: () => report }; };
+    try {
+      const original = [engine.getRenderWidth(), engine.getRenderHeight()];
+      const sizes = [[64, 40], [160, 100], [320, 200], [Math.min(640, original[0]), Math.min(400, original[1])], original]
+        .filter(([w, h], i, a) => i === 0 || w > a[i - 1][0] || h > a[i - 1][1]);
+      post({ ev: 'webgpu-start', renderer: engine._adapterInfo || 'WebGPU', sizes, tier: tierName });
+      for (let i = 0; i < sizes.length; i++) {
+        const [w, h] = sizes[i];
+        engine.setSize(w, h);
+        for (let n = 0; n < 300 && !scene.isReady(); n++) await new Promise((r) => setTimeout(r, 10));
+        post({ ev: 'frame-start', size: [w, h] });
+        const t = performance.now(); scene.render(); engine.flushFramebuffer();
+        const waited = await Promise.race([
+          engine._device.queue.onSubmittedWorkDone().then(() => true),
+          new Promise((r) => setTimeout(() => r(false), 12000)),
+        ]);
+        const ms = Math.round(performance.now() - t);
+        report.frames.push({ size: [w, h], ms, submitted: waited }); post({ ev: 'frame-end', size: [w, h], ms, submitted: waited });
+        if (!waited) { report.stopped = 'GPU queue did not finish within 12 s'; break; }
+        if (i + 1 < sizes.length) {
+          const [nw, nh] = sizes[i + 1], predicted = ms * nw * nh / (w * h);
+          if (predicted > 750 && !QS.has('softgpu')) { report.stopped = `next frame predicted ${Math.round(predicted)} ms`; break; }
+        }
+      }
+      post({ ev: report.stopped ? 'safe-stop' : 'diag-complete', report });
+    } catch (e) { report.stopped = String(e); post({ ev: 'error', msg: report.stopped }); }
+    finish();
+  }
   // Every frame is split into small GPU jobs: a barrier (a 1 px clear + readback on a private framebuffer, which waits for all
   // earlier GPU work) at every render-target / procedural-texture / post-process boundary and at every material change in the
   // main pass. Before each job, a line naming it is sent synchronously to the local server (tools/serve.py /diag-log), which
