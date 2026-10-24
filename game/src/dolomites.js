@@ -75,7 +75,19 @@
   const ASSETS = new URL('../assets/', location.href), assetUrl = (p) => new URL(p, ASSETS).href;
   const V3 = BABYLON.Vector3, C3 = BABYLON.Color3;
   const MAP = 'maps/dolomites/', DBG = +(QS.get('dbg') || 0);
-  statusEl.textContent = 'Loading the Dolomites…';
+  const loadT0 = performance.now();
+  let loadStage = '', loadDetail = '', loadStageT = loadT0;
+  const updateLoadText = () => {
+    if (window.__err || statusEl.hidden) return;
+    const now = performance.now(), stageSecs = Math.floor((now - loadStageT) / 1000), totalSecs = Math.floor((now - loadT0) / 1000);
+    statusEl.textContent = `${loadStage}${loadDetail ? ' · ' + loadDetail : ''} · ${stageSecs}s here (${totalSecs}s total)`;
+  };
+  const setLoadStage = (stage, detail = '') => {
+    if (stage !== loadStage) { loadStage = stage; loadStageT = performance.now(); }
+    loadDetail = detail; statusEl.hidden = false; updateLoadText();
+  };
+  setLoadStage('Loading map data');
+  const loadTicker = setInterval(updateLoadText, 1000);
   document.querySelector('.hud') && (document.querySelector('.hud').style.display = 'none');
   if (QS.has('shot')) { const st = document.createElement('style'); st.textContent = '.tools,.mode,.help,.joy,.hint,#lookPanel{display:none!important}'; document.head.appendChild(st); }
   // phones (2026-10-19, the user): no Look, Sound or Perf toggles, just an fps counter in a corner (below)
@@ -853,8 +865,9 @@ float carAO(vec3 p) {
       });
       // first windows around the start (the default spawn, or &road=); a shot elsewhere streams in on its first frames
       const sp = ROUTE_PTS[QS.has('road') ? Math.min(ROUTE_PTS.length - 1, +QS.get('road')) : 0];
+      mark('terrain prime started'); setLoadStage('Loading terrain tiles');
       await TSTREAM.prime(sp[0], sp[2]);
-      mark('terrain tiles uploaded');
+      mark('terrain tiles uploaded'); setLoadStage('Building roads and towns');
     }
   }
   const lvHArr = GLV.flatMap((L) => [L.offset, L.scale]);
@@ -2555,7 +2568,7 @@ void main() {
     c.fm = P.fm; c.near = null; c.partial = null;
   }, (c) => { for (const m of c.fm) m.dispose(); c.fm = null; c.near = null; c.sm.forEach((m) => m.setEnabled(true)); }, () => B_NEAR);
   window.__bStream = bStream; window.__cellStreams = () => cellStreams.map((S) => ({ name: S.name, built: S.built, n: S.n, maxMs: +S.maxMs.toFixed(1), meanMs: +(S.sumMs / Math.max(1, S.n)).toFixed(1) }));
-  mark('buildings built'); releaseGeometry(); mark('buildings released');      // the buildings' arrays go before the scatter is built: keeps the loading peak down
+  mark('buildings built'); setLoadStage('Placing forests and rocks'); releaseGeometry(); mark('buildings released');      // the buildings' arrays go before the scatter is built: keeps the loading peak down
   bStream.tick(startXZ[0], startXZ[1], Infinity); mark('near buildings built');
   let bT = 0;
   scene.onBeforeRenderObservable.add(() => {
@@ -2930,7 +2943,7 @@ void main() {
     BABYLON.Matrix.ComposeToRef(new V3(sz * (1 + 0.6 * r1), hs, sz * (1.6 - 0.6 * r1)), BABYLON.Quaternion.RotationYawPitchRoll(r1 * 6.28, 0, 0), new V3(x, y, z), M);
     return [y, y + hs];
   }), dropLods, () => Q.rocksR * 1.3).tick(startXZ[0], startXZ[1], Infinity);
-  mark('scatter built'); releaseGeometry(); mark('scatter released');      // trees, rocks and shrubs
+  mark('scatter built'); setLoadStage('Adding roadsides and sky'); releaseGeometry(); mark('scatter released');      // trees, rocks and shrubs
   let treeT = 0;
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now(); if (now - treeT < 300) return; treeT = now;
@@ -4112,7 +4125,7 @@ void main() {
       let res = QS.has('fullcar') ? null : await fetch(assetUrl('cars/alfa33_lod.glb'));
       if (!res || !res.ok) res = await fetch(assetUrl('cars/alfa33.glb'));
       const bytes = new Uint8Array(await res.arrayBuffer());
-      mark('car import start'); const r = await BABYLON.ImportMeshAsync(bytes, scene, { pluginExtension: '.glb' }); mark('car imported');
+      mark('car import start'); setLoadStage('Loading the Alfa Romeo'); const r = await BABYLON.ImportMeshAsync(bytes, scene, { pluginExtension: '.glb' }); mark('car imported');
       car = new BABYLON.TransformNode('carRig', scene); r.meshes[0].parent = car;
       // the hood stays shut here: nothing under it can be seen
       const bay = scene.getTransformNodeByName('EngineBay') || scene.getMeshByName('EngineBay');
@@ -4669,7 +4682,7 @@ void main() {
     window.__watchdog = 'stopped';      // ends the test runner's wait (it waits for frames, an error, or a stopped render loop)
   }
   const ready = () => scene.isReady() && lut.isReady();
-  mark('waiting for ready');
+  mark('waiting for ready'); setLoadStage('Compiling scene shaders');
   await new Promise((res) => { const chk = () => (ready() ? res() : setTimeout(chk, 100)); chk(); });
   mark('ready');
   // ---------- shader warm-up ----------
@@ -4710,13 +4723,18 @@ void main() {
   if (!QS.has('nowarmup')) {
     const gl = engine._gl, t0w = performance.now();
     const warmupProfile = window.__warmupProfile = [];
+    // Phone GPUs are not affected by the AMD 5500M's long first-frame pipeline stall.
+    // One tiny frame can compile every visible pipeline there; keep the per-material
+    // guarded sequence on desktop. &fastwarmup tests this path on SwiftShader.
+    const leanWarmup = (isTouch && !QS.has('fullwarmup')) || QS.has('fastwarmup');
+    window.__warmupMode = leanWarmup ? 'mobile' : 'guarded';
     const fenceWait = async () => { const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
       while (gl.getSyncParameter(f, gl.SYNC_STATUS) !== gl.SIGNALED) await new Promise((r) => setTimeout(r, 4)); gl.deleteSync(f); };
-    const step = (t) => { statusEl.hidden = false; statusEl.textContent = 'Preparing shaders… ' + t; };
+    const step = (t) => setLoadStage('Warming graphics', t);
     mark('per-frame setup'); scene.onBeforeRenderObservable.notifyObservers(scene); mark('per-frame setup done');      // CPU-side per-frame setup, so the warm-up draws what the first frame will
     const cam = scene.activeCamera;
     const mats = scene.materials.filter((m) => scene.meshes.some((x) => x.material === m && x.getTotalVertices() > 0));
-    for (let i = 0; i < mats.length; i++) {
+    for (let i = 0; !leanWarmup && i < mats.length; i++) {
       // disabled meshes too (tunnels switch on near their portals): their first draw mid-drive cost 142 ms
       const m = mats[i], meshes = scene.meshes.filter((x) => x.material === m && x.getTotalVertices() > 0);
       if (!meshes.length) continue;
@@ -4731,12 +4749,18 @@ void main() {
     }
     // the complete frame (post-processing, SSAO, probes, every pass) on a tiny canvas. Materials whose meshes are all out of view
     // (tunnels) would build their main-pass pipeline mid-drive (152 ms): the smallest mesh of each is drawn regardless of the frustum
-    const forced = [];
-    for (const m of mats) { const ms = scene.meshes.filter((x) => x.material === m && x.getTotalVertices() > 0 && x.isEnabled()).sort((a, b) => a.getTotalVertices() - b.getTotalVertices()); if (ms.length && !ms[0].alwaysSelectAsActiveMesh) { ms[0].alwaysSelectAsActiveMesh = true; forced.push(ms[0]); } }
+    const forced = [], temporarilyEnabled = [];
+    for (const m of mats) {
+      const ms = scene.meshes.filter((x) => x.material === m && x.getTotalVertices() > 0 && (leanWarmup || x.isEnabled())).sort((a, b) => a.getTotalVertices() - b.getTotalVertices());
+      if (!ms.length) continue;
+      const x = ms[0];
+      if (leanWarmup && !x.isEnabled()) { x.setEnabled(true); temporarilyEnabled.push(x); }
+      if (!x.alwaysSelectAsActiveMesh) { x.alwaysSelectAsActiveMesh = true; forced.push(x); }
+    }
     const canvas = engine.getRenderingCanvas(), css = [canvas.style.width, canvas.style.height];
     // One tiny first frame compiles the complete render path; the second, larger frame verifies it.
     // Repeating the same 64 x 40 frame added load time without warming a new pipeline.
-    for (const [w, h, label] of [[64, 40, 'frame 1/2'], [160, 100, 'frame 2/2']]) {
+    for (const [w, h, label] of leanWarmup ? [[64, 40, 'frame 1/1']] : [[64, 40, 'frame 1/2'], [160, 100, 'frame 2/2']]) {
       const frameStart = performance.now();
       step(label); canvas.style.width = w + 'px'; canvas.style.height = h + 'px'; engine.setSize(w, h);
       for (let q = 0; q < 300 && !scene.isReady(); q++) await new Promise((r) => setTimeout(r, 10));
@@ -4746,6 +4770,7 @@ void main() {
     }
     canvas.style.width = css[0]; canvas.style.height = css[1]; engine.resize();
     for (const x of forced) x.alwaysSelectAsActiveMesh = false;
+    for (const x of temporarilyEnabled) x.setEnabled(false);
     console.log('shader warm-up', Math.round(performance.now() - t0w), 'ms');
     window.__warmupMs = Math.round(performance.now() - t0w);
     mark('warmup complete');
@@ -4923,7 +4948,22 @@ void main() {
     post({ t: now(), ev: 'diag-complete', worstUnsplitMs: +worst.toFixed(1) });
     show(`DIAG COMPLETE. Worst normal frame ${worst.toFixed(0)} ms. Send me the log file.`); window.__diagDone = true; window.__watchdog = 'stopped';
   }
-  statusEl.hidden = true;
+  clearInterval(loadTicker); statusEl.hidden = true;
+  // &startup: expose the real phone's loading breakdown without changing the normal HUD.
+  // Shader and network costs differ greatly between SwiftShader, AMD/Metal and iOS Safari.
+  const milestone = (name) => (MARKS.find((m) => m[0] === name) || [null, 0])[1];
+  const startupReport = window.__startupReport = {
+    totalMs: Math.round(performance.now()), terrainMs: milestone('terrain tiles uploaded'),
+    sceneMs: milestone('ready'), warmupMs: window.__warmupMs || 0,
+    mode: window.__warmupMode || 'none', resources: performance.getEntriesByType('resource').length,
+  };
+  try { localStorage.setItem('poStartupLast', JSON.stringify(startupReport)); } catch (_) {}
+  if (QS.has('startup')) {
+    const box = document.createElement('div'); box.id = 'startupTiming';
+    box.style.cssText = 'position:fixed;top:env(safe-area-inset-top,0px);left:50%;transform:translateX(-50%);z-index:60;background:rgba(12,24,33,.88);color:white;padding:5px 10px;border-radius:8px;font:12px system-ui,sans-serif;white-space:nowrap;pointer-events:none';
+    box.textContent = `Load ${(startupReport.totalMs / 1000).toFixed(1)}s · terrain ${(startupReport.terrainMs / 1000).toFixed(1)}s · scene ${(startupReport.sceneMs / 1000).toFixed(1)}s · shaders ${(startupReport.warmupMs / 1000).toFixed(1)}s`;
+    document.body.appendChild(box);
+  }
   releaseGeometry();      // again, for anything built during the warm-up (cheap: released buffers are skipped)
   if (modeChip && !DRIVE) modeChip.textContent = 'Dolomites look-dev · G: look panel · WASD + mouse: fly';
   // frame watchdog: a frame over 250 ms (twice) drops the expensive passes; over 2 s the loop stops rather than keep a hung GPU busy
