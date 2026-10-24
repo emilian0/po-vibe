@@ -249,10 +249,25 @@ bool inTunnelMouth(vec3 p) {
 
   // ---------- engine ----------
   const canvas = $('c');
-  // the look-dev shaders are GLSL for now (WGSL ports come once the look is accepted): WebGL2 only
+  // The corridor can opt into WebGPU while its backend-specific texture and shadow paths are ported.
   // doNotHandleContextLost: Babylon otherwise keeps a CPU copy of every texture and vertex buffer to rebuild them after a lost
   // GPU context (about 400 MB here, part of what crashed phone and Safari tabs while loading). A lost context now asks for a reload.
-  const engine = new BABYLON.Engine(canvas, true, { stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: QS.has('shot'), doNotHandleContextLost: true }, true);
+  const WEBGPU = QS.has('webgpu');
+  let engine;
+  if (WEBGPU) {
+    try {
+      if (!await BABYLON.WebGPUEngine.IsSupportedAsync) throw new Error('WebGPU is unavailable');
+      engine = new BABYLON.WebGPUEngine(canvas, { antialias: true, powerPreference: 'high-performance', adaptToDeviceRatio: false,
+        doNotHandleContextLost: true, deviceDescriptor: { requiredFeatures: ['texture-compression-astc', 'texture-compression-bc', 'texture-compression-etc2'] } });
+      await engine.initAsync();
+    } catch (e) {
+      console.warn('WebGPU setup failed; restarting with WebGL', e);
+      const u = new URL(location.href); u.searchParams.delete('webgpu'); location.replace(u.href); return;
+    }
+    engine._device.addEventListener('uncapturederror', (e) => {
+      if (!window.__err) fail('WebGPU validation: ' + String(e.error?.message || e.error || e).slice(0, 280));
+    });
+  } else engine = new BABYLON.Engine(canvas, true, { stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: QS.has('shot'), doNotHandleContextLost: true }, true);
   engine.onContextLostObservable.add(() => fail('The graphics context was lost (often low memory). Please reload the page.'));
   engine.useReverseDepthBuffer = true;
   // ---------- quality tier: a short GPU benchmark at load picks it (?quality=low|medium|high|ultra overrides); resolution then adapts ----------
@@ -280,7 +295,7 @@ bool inTunnelMouth(vec3 p) {
       })();
     } catch (e) { console.warn('benchmark failed', e); return Promise.resolve(20); }
   };
-  const benchMs = await benchGPU();
+  const benchMs = WEBGPU ? 3 : await benchGPU();
   let tierName = QS.get('quality');
   // phones (2026-10-19): medium, tuned below. The limit on phones is memory, not GPU time (an iPhone held 60 fps at low and
   // medium measured within ~20 MB of low), and the resolution adapts to the GPU anyway
@@ -402,6 +417,7 @@ bool inTunnelMouth(vec3 p) {
   // ---------- shared GLSL ----------
   const GL_COMMON = `
 precision highp float;
+${WEBGPU ? '#define texture(s, uv) textureLod(s, uv, 0.0)' : ''}
 const float INV_S = ${INV_S.toFixed(6)};      // real metres per game metre (world scale)
 uniform vec3 floatO;     // floating origin: Babylon's view-projection is relative to it
 uniform vec3 camPos;
@@ -821,7 +837,26 @@ float carAO(vec3 p) {
     // texture arrays allocated empty on the GPU (S x S per layer, no mipmaps: none were ever built for these arrays) and filled
     // piece by piece: whole layers on the old path, 64 x 64 tiles when streaming. Wrapped as Babylon textures like the KTX2 arrays.
     const gl = engine._gl, S = S_WIN;
-    const gpuArray = (internal, filter, layers) => {
+    const gpuArray = (internal, format, type, filter, layers) => {
+      if (WEBGPU) {
+        const bt = new BABYLON.RawTexture2DArray(null, S, S, Math.max(1, layers), format, scene, false, false, filter, type);
+        bt.wrapU = bt.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+        bt.put = (i, x, y, w, h, _format, _type, data) => {
+          const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+          const rowBytes = w * (format === BABYLON.Constants.TEXTUREFORMAT_RED_INTEGER ? 2 : 4);
+          const stride = Math.ceil(rowBytes / 256) * 256;
+          let upload = bytes;
+          if (stride !== rowBytes) {
+            upload = new Uint8Array(stride * h);
+            for (let r = 0; r < h; r++) upload.set(bytes.subarray(r * rowBytes, (r + 1) * rowBytes), r * stride);
+          }
+          engine._device.queue.writeTexture(
+            { texture: bt.getInternalTexture()._hardwareTexture.underlyingResource, origin: { x, y, z: i } },
+            upload, { bytesPerRow: stride, rowsPerImage: h }, { width: w, height: h, depthOrArrayLayers: 1 });
+        };
+        bt.layer = (i, pixelFormat, pixelType, data) => bt.put(i, 0, 0, S, S, pixelFormat, pixelType, data);
+        return bt;
+      }
       const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, internal, S, S, Math.max(1, layers));
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache();
       const it = new BABYLON.InternalTexture(engine, BABYLON.InternalTextureSource.Raw2DArray);
@@ -834,12 +869,13 @@ float carAO(vec3 p) {
       bt.layer = (i, format, type, data) => bt.put(i, 0, 0, S, S, format, type, data);
       return bt;
     };
-    hArr = gpuArray(gl.R16UI, BABYLON.Texture.NEAREST_SAMPLINGMODE, GNL);
-    nArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE, GNL);
-    aArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE, G_ND); bArr = gpuArray(gl.RGBA8, BABYLON.Texture.BILINEAR_SAMPLINGMODE, G_ND);
+    hArr = gpuArray(gl?.R16UI, BABYLON.Constants.TEXTUREFORMAT_RED_INTEGER, BABYLON.Constants.TEXTURETYPE_UNSIGNED_SHORT, BABYLON.Texture.NEAREST_SAMPLINGMODE, GNL);
+    nArr = gpuArray(gl?.RGBA8, BABYLON.Constants.TEXTUREFORMAT_RGBA, BABYLON.Constants.TEXTURETYPE_UNSIGNED_BYTE, BABYLON.Texture.BILINEAR_SAMPLINGMODE, GNL);
+    aArr = gpuArray(gl?.RGBA8, BABYLON.Constants.TEXTUREFORMAT_RGBA, BABYLON.Constants.TEXTURETYPE_UNSIGNED_BYTE, BABYLON.Texture.BILINEAR_SAMPLINGMODE, G_ND);
+    bArr = gpuArray(gl?.RGBA8, BABYLON.Constants.TEXTUREFORMAT_RGBA, BABYLON.Constants.TEXTURETYPE_UNSIGNED_BYTE, BABYLON.Texture.BILINEAR_SAMPLINGMODE, G_ND);
     if (!TILES) {      // the old path (&notiles, or no tiles built): whole levels from the level maps
-      GLV.forEach((L) => hArr.layer(L.i, gl.RED_INTEGER, gl.UNSIGNED_SHORT, HT[L.name]));
-      for (const L of GLV) nArr.layer(L.i, gl.RGBA, gl.UNSIGNED_BYTE, await imgBytes(MAP + L.name + '_n.png'));
+      GLV.forEach((L) => hArr.layer(L.i, gl?.RED_INTEGER, gl?.UNSIGNED_SHORT, HT[L.name]));
+      for (const L of GLV) nArr.layer(L.i, gl?.RGBA, gl?.UNSIGNED_BYTE, await imgBytes(MAP + L.name + '_n.png'));
       mark('normal maps uploaded');
       for (const L of GLV) {
         if (!L.detail) continue;
@@ -853,15 +889,15 @@ float carAO(vec3 p) {
           F[p] = (canopy < 8 && scree < 90 && outcrop < 170 && urban < 60 && vine < 60 && orchard < 60 ? 1 : 0) | (vine >= 140 ? 2 : 0) | (orchard >= 140 ? 4 : 0)
             | (scree > 90 || outcrop > 170 ? 8 : 0) | (canopy > 12 ? 16 : 0); }
         DETAIL_F[L.name] = F;
-        aArr.layer(L.dI, gl.RGBA, gl.UNSIGNED_BYTE, aL); bArr.layer(L.dI, gl.RGBA, gl.UNSIGNED_BYTE, bL);
+        aArr.layer(L.dI, gl?.RGBA, gl?.UNSIGNED_BYTE, aL); bArr.layer(L.dI, gl?.RGBA, gl?.UNSIGNED_BYTE, bL);
       }
       mark('detail maps uploaded');
     } else {
       for (const L of LVL) if (L.detail) DETAIL_F[L.name] = new Uint8Array(await inflate(await getBin(MAP + 'tiles/flags/' + L.name + '.f')));
       TSTREAM = terrainStream(TILES.T, S, (L, sx, sy, t) => {
-        hArr.put(L.i, sx, sy, TILES.T, TILES.T, gl.RED_INTEGER, gl.UNSIGNED_SHORT, t.h);
-        nArr.put(L.i, sx, sy, TILES.T, TILES.T, gl.RGBA, gl.UNSIGNED_BYTE, t.n);
-        if (L.detail) { aArr.put(L.dI, sx, sy, TILES.T, TILES.T, gl.RGBA, gl.UNSIGNED_BYTE, t.a); bArr.put(L.dI, sx, sy, TILES.T, TILES.T, gl.RGBA, gl.UNSIGNED_BYTE, t.b); }
+        hArr.put(L.i, sx, sy, TILES.T, TILES.T, gl?.RED_INTEGER, gl?.UNSIGNED_SHORT, t.h);
+        nArr.put(L.i, sx, sy, TILES.T, TILES.T, gl?.RGBA, gl?.UNSIGNED_BYTE, t.n);
+        if (L.detail) { aArr.put(L.dI, sx, sy, TILES.T, TILES.T, gl?.RGBA, gl?.UNSIGNED_BYTE, t.a); bArr.put(L.dI, sx, sy, TILES.T, TILES.T, gl?.RGBA, gl?.UNSIGNED_BYTE, t.b); }
       });
       // first windows around the start (the default spawn, or &road=); a shot elsewhere streams in on its first frames
       const sp = ROUTE_PTS[QS.has('road') ? Math.min(ROUTE_PTS.length - 1, +QS.get('road')) : 0];
@@ -896,30 +932,50 @@ float carAO(vec3 p) {
     if (!window.BASIS) await new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'lib/basis/basis_transcoder.js'; s.onload = res; s.onerror = () => rej(new Error('basis transcoder script')); document.head.appendChild(s); });
     const M = window.__basisM || (window.__basisM = await window.BASIS({ locateFile: (f) => 'lib/basis/' + f }));
     M.initializeBasis();
-    const gl = engine._gl, caps = engine.getCaps();
-    const TF = M.transcoder_texture_format, ext = (n) => gl.getExtension(n);
-    let fmt, glFmt, name;
-    if (caps.astc && ext('WEBGL_compressed_texture_astc')) { fmt = TF.cTFASTC_4x4_RGBA.value; glFmt = ext('WEBGL_compressed_texture_astc').COMPRESSED_RGBA_ASTC_4x4_KHR; name = 'ASTC 4x4'; }
-    else if (caps.bptc && ext('EXT_texture_compression_bptc')) { fmt = TF.cTFBC7_RGBA.value; glFmt = ext('EXT_texture_compression_bptc').COMPRESSED_RGBA_BPTC_UNORM_EXT; name = 'BC7'; }
-    else if (ext('WEBGL_compressed_texture_etc')) { fmt = TF.cTFETC2_RGBA.value; glFmt = ext('WEBGL_compressed_texture_etc').COMPRESSED_RGBA8_ETC2_EAC; name = 'ETC2'; }
-    else { fmt = TF.cTFRGBA32.value; glFmt = gl.RGBA8; name = 'RGBA'; }
-    if (QS.get('ktxfmt') === 'rgba') { fmt = TF.cTFRGBA32.value; glFmt = gl.RGBA8; name = 'RGBA'; }      // test: same data, uncompressed
+    const gl = engine._gl, caps = engine.getCaps(), device = WEBGPU ? engine._device : null;
+    const TF = M.transcoder_texture_format, ext = (n) => gl && gl.getExtension(n);
+    let fmt, glFmt, gpuFmt, name;
+    if (WEBGPU && device.features.has('texture-compression-etc2')) { fmt = TF.cTFETC2_RGBA.value; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_COMPRESSED_RGBA8_ETC2_EAC; name = 'ETC2'; }
+    else if (WEBGPU ? device.features.has('texture-compression-bc') : caps.bptc && ext('EXT_texture_compression_bptc')) { fmt = TF.cTFBC7_RGBA.value; glFmt = WEBGPU ? 0 : ext('EXT_texture_compression_bptc').COMPRESSED_RGBA_BPTC_UNORM_EXT; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_COMPRESSED_RGBA_BPTC_UNORM; name = 'BC7'; }
+    else if (WEBGPU ? device.features.has('texture-compression-astc') : caps.astc && ext('WEBGL_compressed_texture_astc')) { fmt = TF.cTFASTC_4x4_RGBA.value; glFmt = WEBGPU ? 0 : ext('WEBGL_compressed_texture_astc').COMPRESSED_RGBA_ASTC_4x4_KHR; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_COMPRESSED_RGBA_ASTC_4x4; name = 'ASTC 4x4'; }
+    else if (ext('WEBGL_compressed_texture_etc')) { fmt = TF.cTFETC2_RGBA.value; glFmt = ext('WEBGL_compressed_texture_etc').COMPRESSED_RGBA8_ETC2_EAC; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_COMPRESSED_RGBA8_ETC2_EAC; name = 'ETC2'; }
+    else { fmt = TF.cTFRGBA32.value; glFmt = gl && gl.RGBA8; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_RGBA; name = 'RGBA'; }
+    // Compressed WebGPU mips currently render dark blocks at Riva in SwiftShader.
+    // The 512 px RGBA chain occupies about the same GPU memory as 1024 px ASTC/ETC2.
+    if (WEBGPU && !QS.has('wgpucompressed')) { fmt = TF.cTFRGBA32.value; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_RGBA; name = 'RGBA'; }
+    if (QS.get('ktxfmt') === 'etc2' && WEBGPU && device.features.has('texture-compression-etc2')) { fmt = TF.cTFETC2_RGBA.value; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_COMPRESSED_RGBA8_ETC2_EAC; name = 'ETC2'; }
+    if (QS.get('ktxfmt') === 'bc7' && WEBGPU && device.features.has('texture-compression-bc')) { fmt = TF.cTFBC7_RGBA.value; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_COMPRESSED_RGBA_BPTC_UNORM; name = 'BC7'; }
+    if (QS.get('ktxfmt') === 'rgba') { fmt = TF.cTFRGBA32.value; glFmt = gl && gl.RGBA8; gpuFmt = BABYLON.Constants.TEXTUREFORMAT_RGBA; name = 'RGBA'; }      // test: same data, uncompressed
     const k = new M.KTX2File(new Uint8Array(await (await fetch(assetUrl(path))).arrayBuffer()));
     try {
       if (!k.isValid()) throw new Error('invalid KTX2 ' + path);
       const w = k.getWidth(), h = k.getHeight(), layers = Math.max(1, k.getLayers()), levels = k.getLevels();
       if (!k.startTranscoding()) throw new Error('startTranscoding ' + path);
-      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
-      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, levels, glFmt, w, h, layers);
-      for (let lv = 0; lv < levels; lv++) {
-        const lw = Math.max(1, w >> lv), lh = Math.max(1, h >> lv);
+      const firstMip = WEBGPU && name === 'RGBA' && !QS.has('fullphoto') ? 1 : 0;
+      // WebGPU writeTexture requires block-aligned copy extents even for the final
+      // 2x2 and 1x1 levels. A 4x4 last mip is sufficient for these photo scans.
+      const usedLevels = (WEBGPU && name !== 'RGBA' ? levels - 2 : levels) - firstMip;
+      const tex = WEBGPU ? null : gl.createTexture();
+      if (!WEBGPU) { gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, levels, glFmt, w, h, layers); }
+      const gpuBt = WEBGPU ? new BABYLON.RawTexture2DArray(null, w >> firstMip, h >> firstMip, layers, gpuFmt, scene, usedLevels > 1, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE, BABYLON.Constants.TEXTURETYPE_UNSIGNED_BYTE, 0, usedLevels) : null;
+      const gpuTex = WEBGPU && gpuBt.getInternalTexture()._hardwareTexture.underlyingResource;
+      for (let lv = 0; lv < usedLevels; lv++) {
+        const sourceMip = lv + firstMip, lw = Math.max(1, w >> sourceMip), lh = Math.max(1, h >> sourceMip);
         for (let ly = 0; ly < layers; ly++) {
-          const dst = new Uint8Array(k.getImageTranscodedSizeInBytes(lv, ly, 0, fmt));
-          if (!k.transcodeImage(dst, lv, ly, 0, fmt, 0, -1, -1)) throw new Error('transcode ' + path + ' ' + lv + '/' + ly);
-          if (name === 'RGBA') gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, lv, 0, 0, ly, lw, lh, 1, gl.RGBA, gl.UNSIGNED_BYTE, dst);
+          const dst = new Uint8Array(k.getImageTranscodedSizeInBytes(sourceMip, ly, 0, fmt));
+          if (!k.transcodeImage(dst, sourceMip, ly, 0, fmt, 0, -1, -1)) throw new Error('transcode ' + path + ' ' + sourceMip + '/' + ly);
+          if (WEBGPU) {
+            const block = name === 'RGBA' ? 1 : 4, rowBytes = Math.ceil(lw / block) * (name === 'RGBA' ? 4 : 16);
+            const rows = Math.ceil(lh / block), stride = Math.ceil(rowBytes / 256) * 256;
+            const upload = stride === rowBytes ? dst : new Uint8Array(stride * rows);
+            if (upload !== dst) for (let row = 0; row < rows; row++) upload.set(dst.subarray(row * rowBytes, (row + 1) * rowBytes), row * stride);
+            device.queue.writeTexture({ texture: gpuTex, mipLevel: lv, origin: { x: 0, y: 0, z: ly } }, upload,
+              { bytesPerRow: stride, rowsPerImage: rows }, { width: lw, height: lh, depthOrArrayLayers: 1 });
+          } else if (name === 'RGBA') gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, lv, 0, 0, ly, lw, lh, 1, gl.RGBA, gl.UNSIGNED_BYTE, dst);
           else gl.compressedTexSubImage3D(gl.TEXTURE_2D_ARRAY, lv, 0, 0, ly, lw, lh, 1, glFmt, dst);
         }
       }
+      if (WEBGPU) { gpuBt.name = path; window.__ktx = Object.assign(window.__ktx || {}, { [path]: name + ' ' + (w >> firstMip) + 'x' + (h >> firstMip) + 'x' + layers + ' mips ' + usedLevels }); return gpuBt; }
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache();
       const it = new BABYLON.InternalTexture(engine, BABYLON.InternalTextureSource.Raw2DArray);
       it.baseWidth = it.width = w; it.baseHeight = it.height = h; it.baseDepth = it.depth = layers; it.is2DArray = true;
@@ -973,13 +1029,21 @@ void main() {
   }
   // sun disc ~0.53 deg plus a little extra softness for scattering in the air
   float s = smoothstep(-pen, pen, tanE - occ);
-  gl_FragColor = vec4(s, s, s, 1.0);
+  gl_FragColor = vec4(${QS.has('blackshadow') ? '0.0' : 's'}, ${QS.has('blackshadow') ? '0.0' : 's'}, ${QS.has('blackshadow') ? '0.0' : 's'}, 1.0);
 }`;
   // the shadows of all levels live in one R8 texture array, a layer per level at one shadow texel per level texel and wrapped like the
   // level windows (one sampler instead of one per level: with nine levels a shader ran past the 16 texture units a GPU, and an
   // iPhone, allows). Each job renders into one scratch procedural texture (the whole layer cheaply, or a tile at full quality, GL
   // scissor) and is copied into its layer at once.
   const shArr = (() => {
+    if (WEBGPU) {
+      // Until the tiled shadow pass is ported, keep the shader's array sampler valid.
+      // White means unoccluded sunlight; the WebGL route remains unchanged.
+      const white = new Uint8Array(S_WIN * S_WIN * GNL).fill(255);
+      const bt = new BABYLON.RawTexture2DArray(white, S_WIN, S_WIN, GNL, BABYLON.Constants.TEXTUREFORMAT_RED, scene, false, false, BABYLON.Texture.BILINEAR_SAMPLINGMODE);
+      bt.wrapU = bt.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+      return bt;
+    }
     const gl = engine._gl, S = S_WIN, tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, S, S, GNL);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); engine.resetTextureCache();
@@ -990,22 +1054,38 @@ void main() {
     const bt = new BABYLON.BaseTexture(scene, it); bt.wrapU = bt.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE; bt.glTex_ = tex;
     return bt;
   })();
-  const shadowPT = new BABYLON.ProceduralTexture('terrainShadowPass', S_WIN, 'terrainShadow', scene, null, false, false);
+  if (WEBGPU) window.__shadowArray = shArr;
+  const shadowPT = new BABYLON.ProceduralTexture('terrainShadowPass', S_WIN, 'terrainShadow', scene, WEBGPU ? { format: BABYLON.Constants.TEXTUREFORMAT_RED } : null, false, false);
+  if (WEBGPU) window.__shadowScratch = shadowPT;
   {
     const pt = shadowPT, L = GLV[0];
     pt.refreshRate = 0; pt.isEnabled = false; pt.autoClear = false;
     pt.setTexture('hArr', hArr); pt.setFloats('lvDf', lvDArr); pt.setFloats('lvHf', lvHArr); pt.setFloats('patchCf', patchCArr); pt.setFloats('lvWf', lvWArr); pt.setVector2('strC', strC); levelMats.push(pt);
     pt.setVector4('thisL', new BABYLON.Vector4(L.cx, L.cz, L.half, L.res)); pt.setVector4('thisW', new BABYLON.Vector4(0, 0, S_WIN, 0)); pt.setTexture('skyLUT', skyLUT); pt.setVector3('sunDir', new V3(0, 1, 0)); pt.setFloat('pen', 0.02); pt.setFloat('cheap', 1);   // every uniform must be set before the effect compiles
     // a tile, when set, limits the pass to that rectangle (GL scissor); off again right after
-    pt.onBeforeGenerationObservable.add(() => { const tl = pt.tile_; if (!tl) return; const gl = engine._gl; gl.enable(gl.SCISSOR_TEST); gl.scissor(tl[0], tl[1], tl[2], tl[3]); });
-    pt.onGeneratedObservable.add(() => { const gl = engine._gl; gl.disable(gl.SCISSOR_TEST); });
+    if (WEBGPU) {
+      pt.onBeforeGenerationObservable.add(() => { const tl = pt.tile_; if (tl) engine.enableScissor(tl[0], tl[1], tl[2], tl[3]); });
+      pt.onGeneratedObservable.add(() => engine.disableScissor());
+    } else {
+      pt.onBeforeGenerationObservable.add(() => { const tl = pt.tile_; if (!tl) return; const gl = engine._gl; gl.enable(gl.SCISSOR_TEST); gl.scissor(tl[0], tl[1], tl[2], tl[3]); });
+      pt.onGeneratedObservable.add(() => { const gl = engine._gl; gl.disable(gl.SCISSOR_TEST); });
+    }
   }
   let shadowReadFb = null;
   const runShadowJob = (j) => {
+    if (WEBGPU && !QS.has('wgpushadows')) return;
     const gl = engine._gl, pt = shadowPT, L = GLV[j.li], o = TSTREAM && L.win ? TSTREAM.target(L) : [0, 0];
     pt.setVector4('thisL', new BABYLON.Vector4(L.cx, L.cz, L.half, L.res)); pt.setVector4('thisW', new BABYLON.Vector4(o[0], o[1], S_WIN, L.win ? 1 : 0));
     pt.setFloat('cheap', j.cheap); pt.tile_ = j.tile; pt.render();
     const it = pt.getInternalTexture(), src = it && it._hardwareTexture && it._hardwareTexture.underlyingResource; if (!src) return;
+    if (WEBGPU) {
+      const t = j.tile || [0, 0, S_WIN, S_WIN];
+      engine._renderEncoder.copyTextureToTexture(
+        { texture: src, origin: { x: t[0], y: t[1], z: 0 } },
+        { texture: shArr.getInternalTexture()._hardwareTexture.underlyingResource, origin: { x: t[0], y: t[1], z: j.li } },
+        { width: t[2], height: t[3], depthOrArrayLayers: 1 });
+      return;
+    }
     const prevRead = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
     if (!shadowReadFb) shadowReadFb = gl.createFramebuffer();
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, shadowReadFb); gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src, 0);
@@ -1014,14 +1094,16 @@ void main() {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead); engine.resetTextureCache();
   };
   // a streamed tile gets its shadow at full quality right away (its window texels held another tile's shadow)
-  if (TSTREAM) TSTREAM.onTile = (L, tx, ty) => { if (!L.win) return; const T = TILES.T; shadowJobs.push({ li: L.i, tile: [(tx * T) % S_WIN, (ty * T) % S_WIN, T, T], cheap: 0, px: T * T }); };
+  if (TSTREAM && (!WEBGPU || (QS.has('wgpushadows') && QS.get('wgpushadows') !== 'single'))) TSTREAM.onTile = (L, tx, ty) => { if (!L.win) return; const T = TILES.T; shadowJobs.push({ li: L.i, tile: [(tx * T) % S_WIN, (ty * T) % S_WIN, T, T], cheap: 0, px: T * T }); };
   // terrain shadows are rendered in pieces: one cheap full-layer pass per level, then 256 px tiles at full quality, a pixel budget
   // per frame. No single GPU submission is ever a whole 2048 px ray-march (that stalled the GPU for seconds).
   const SHADOW_TILE = 256, SHADOW_BUDGET = QS.has('shadowbudget') ? +QS.get('shadowbudget') : 2 * 256 * 256;
   let shadowDirty = true, shadowJobs = [];
   const refreshShadows = () => {
-    const s = LIGHT.sunDir; shadowJobs = [];
-    shadowPT.setVector3('sunDir', new V3(s[0], s[1], s[2])); shadowPT.setFloat('pen', P.penumbra);
+    if (WEBGPU && !QS.has('wgpushadows')) { shadowJobs = []; shadowDirty = false; return; }
+    const s = LIGHT.sunDir; shadowPT.setVector3('sunDir', new V3(s[0], s[1], s[2])); shadowPT.setFloat('pen', P.penumbra);
+    if (WEBGPU && QS.get('wgpushadows') === 'single') { shadowJobs = [{ li: 0, tile: null, cheap: 1, px: S_WIN * S_WIN / 16 }]; shadowDirty = false; return; }
+    shadowJobs = [];
     if (QS.has('shadowold')) {      // comparison only: every level at full quality in one frame, as before
       for (const L of GLV) shadowJobs.push({ li: L.i, tile: null, cheap: 0, px: 0 });
       shadowDirty = false; return;
@@ -1037,7 +1119,7 @@ void main() {
     while (TSTREAM && TSTREAM.pending() > 0 && performance.now() - t0 < ms) { const c = scene.activeCamera.position; TSTREAM.update(c.x, c.z); await new Promise((r) => setTimeout(r, 30)); }
     { const c = scene.activeCamera.position; for (const st of cellStreams) st.tick(c.x, c.z, Infinity); }      // vegetation cells
     if (shadowDirty) refreshShadows();
-    while (shadowJobs.length && performance.now() - t0 < ms) { shadowStep(); engine._gl.flush(); await new Promise((r) => setTimeout(r, 4)); }
+    while (shadowJobs.length && performance.now() - t0 < ms) { shadowStep(); if (WEBGPU) engine.flushFramebuffer(); else engine._gl.flush(); await new Promise((r) => setTimeout(r, 4)); }
   };
   window.__terrainSettle = terrainSettle;
   window.__GLV = GLV;
@@ -1228,9 +1310,8 @@ uniform float waterY; uniform vec4 lakeBox; const bool SHORE_OFF = ${QS.has('nos
 varying vec3 vPos;
 // repetition-free sampling (after I. Quilez, "texture repetition", technique 3): a low-frequency noise picks one of 8 offsets per patch
 // and neighbouring patches are blended, so the same tile never lines up twice
-void noTile(vec2 uv, float layer, out vec3 a, out vec3 b) {
+void noTile(vec2 uv, float layer, vec2 dx, vec2 dy, out vec3 a, out vec3 b) {
   float k = vnoise(uv * 0.13);
-  vec2 dx = dFdx(uv), dy = dFdy(uv);
   float l = k * 8.0, f = fract(l), ia = floor(l), ib = ia + 1.0;
   vec2 oa = sin(vec2(3.0, 7.0) * ia), ob = sin(vec2(3.0, 7.0) * ib);
   vec3 a1 = textureGrad(texAlb, vec3(uv + oa, layer), dx, dy).rgb, a2 = textureGrad(texAlb, vec3(uv + ob, layer), dx, dy).rgb;
@@ -1239,6 +1320,7 @@ void noTile(vec2 uv, float layer, out vec3 a, out vec3 b) {
   a = mix(a1, a2, t); b = mix(b1, b2, t);
 }
 void main() {
+  vec3 dPosX = dFdx(vPos), dPosY = dFdy(vPos);
   if (nPortal > 0.0 && inTunnelMouth(vPos)) discard;      // the tunnel portals open the mountain
   vec2 xz = vPos.xz;
   levelSetup(xz);
@@ -1256,14 +1338,14 @@ void main() {
     // forward differences (3 evaluations; screen-space derivatives were cheaper but shaded in 2 x 2 pixel steps). The bands shade
     // down to twice the pixel footprint, finer than the mesh carries them.
     vec2 mc = MICRO ? microClass(alt, slope, dA) : vec2(0.0);
-    float cellF = 2.0 * max(length(dFdx(vPos)), length(dFdy(vPos))), sc = mc.x, oc = mc.y;
+    float cellF = 2.0 * max(length(dPosX), length(dPosY)), sc = mc.x, oc = mc.y;
     float e = 0.2, a0 = alt - microH(xz, alt, slope, sc, oc, cellF), h0 = microH(xz, a0, slope, sc, oc, cellF);
     float gx = microH(xz + vec2(e, 0.0), a0, slope, sc, oc, cellF) - h0;
     float gz = microH(xz + vec2(0.0, e), a0, slope, sc, oc, cellF) - h0;
     N = normalize(N + vec3(-gx, 0.0, -gz) / e * mfade);
   }
   // faceted rock: on walls shade with the carved geometry itself (flat per triangle, which reads as angular rock)
-  vec3 Ng = normalize(cross(dFdx(vPos), dFdy(vPos))); if (dot(Ng, camPos - vPos) < 0.0) Ng = -Ng;
+  vec3 Ng = normalize(cross(dPosX, dPosY)); if (dot(Ng, camPos - vPos) < 0.0) Ng = -Ng;
   N = normalize(mix(N, Ng, smoothstep(0.36, 0.6, slope) * 0.7 * (1.0 - smoothstep(1500.0, 3500.0, dist))));
 
   // ---- material weights: slope, altitude, aspect, curvature, noise ----
@@ -1310,12 +1392,14 @@ void main() {
       vec2 uv1 = xz / sc, uv2 = mat2(0.8, 0.6, -0.6, 0.8) * xz / (sc * 4.7);
       if (dist < 60.0) {      // one parallax step from the scan's height: the ground gets depth up close
         vec3 V = normalize(camPos - vPos);
-        float hp = texture(texNH, vec3(uv1, float(i))).b;
+        float hp = textureGrad(texNH, vec3(uv1, float(i)), dPosX.xz / sc, dPosY.xz / sc).b;
         uv1 += V.xz / max(V.y, 0.25) * (hp - 0.5) * 0.06 / sc * (1.0 - smoothstep(30.0, 60.0, dist));
       }
       vec3 a1, b1, a2, b2;
-      if (dist < 450.0) { noTile(uv1, float(i), a1, b1); noTile(uv2, float(i), a2, b2); }
-      else { a1 = texture(texAlb, vec3(uv1, float(i))).rgb; b1 = texture(texNH, vec3(uv1, float(i))).rgb; a2 = texture(texAlb, vec3(uv2, float(i))).rgb; b2 = texture(texNH, vec3(uv2, float(i))).rgb; }
+      vec2 du1 = dPosX.xz / sc, dv1 = dPosY.xz / sc;
+      vec2 du2 = mat2(0.8, 0.6, -0.6, 0.8) * dPosX.xz / (sc * 4.7), dv2 = mat2(0.8, 0.6, -0.6, 0.8) * dPosY.xz / (sc * 4.7);
+      if (dist < 450.0) { noTile(uv1, float(i), du1, dv1, a1, b1); noTile(uv2, float(i), du2, dv2, a2, b2); }
+      else { a1 = textureGrad(texAlb, vec3(uv1, float(i)), du1, dv1).rgb; b1 = textureGrad(texNH, vec3(uv1, float(i)), du1, dv1).rgb; a2 = textureGrad(texAlb, vec3(uv2, float(i)), du2, dv2).rgb; b2 = textureGrad(texNH, vec3(uv2, float(i)), du2, dv2).rgb; }
       a1 = pow(a1, vec3(2.2)); a2 = pow(a2, vec3(2.2));
       if (i == 3) { vec3 lw3 = vec3(0.3, 0.55, 0.15); a1 = mix(dot(a1, lw3) / dot(layerMean[3], lw3) * layerMean[3], a1, 0.15); }     // the dry-grass scan has pink leaves: pull them to the scan's mean hue
       vec3 a = a1 * clamp(a2 / max(layerMean[i], vec3(0.01)), 0.5, 1.6);
@@ -3537,8 +3621,8 @@ varying vec3 vPos; varying vec3 vN; varying vec2 vUV; varying vec2 vU2;
 void main() {
   vec3 N = normalize(vN);
   vec3 g = pow(texture(texAlb, vec3(vPos.xz / 1.4, 2.0)).rgb, vec3(2.2)) * grassGain;
-  float s = vUV.x / 3.2, pass = smoothstep(0.4, 0.6, abs(fract(s) - 0.5) * 2.0);      // mower passes: alternating tones
-  vec3 alb = g * vec3(1.25, 1.18, 0.78) * mix(0.9, 1.08, pass) * (0.92 + 0.16 * vU2.x);
+  float s = vUV.x / 3.2, mowPass = smoothstep(0.4, 0.6, abs(fract(s) - 0.5) * 2.0);      // mower passes: alternating tones
+  vec3 alb = g * vec3(1.25, 1.18, 0.78) * mix(0.9, 1.08, mowPass) * (0.92 + 0.16 * vU2.x);
   float row = (1.0 - smoothstep(0.05, 0.16, abs(fract(vUV.x / 6.0 + vU2.x) - 0.5))) * vU2.y * (0.75 + 0.25 * vnoise(vPos.xz * 0.8));
   alb = mix(alb, vec3(0.2, 0.16, 0.075) * (0.85 + 0.3 * vnoise(vPos.xz * 2.0)), row);      // drying hay in rows
   float sh = sunShadow(vPos.xz) * cloudShade(vPos);
@@ -4728,7 +4812,8 @@ void main() {
     // guarded sequence on desktop. &fastwarmup tests this path on SwiftShader.
     const leanWarmup = (isTouch && !QS.has('fullwarmup')) || QS.has('fastwarmup');
     window.__warmupMode = leanWarmup ? 'mobile' : 'guarded';
-    const fenceWait = async () => { const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
+    const fenceWait = WEBGPU ? async () => { await engine._device.queue.onSubmittedWorkDone(); } : async () => {
+      const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
       while (gl.getSyncParameter(f, gl.SYNC_STATUS) !== gl.SIGNALED) await new Promise((r) => setTimeout(r, 4)); gl.deleteSync(f); };
     const step = (t) => setLoadStage('Warming graphics', t);
     mark('per-frame setup'); scene.onBeforeRenderObservable.notifyObservers(scene); mark('per-frame setup done');      // CPU-side per-frame setup, so the warm-up draws what the first frame will
@@ -4743,7 +4828,7 @@ void main() {
       step(`${i + 1}/${mats.length}`);
       const rt = new BABYLON.RenderTargetTexture('warmup', 8, scene, false); rt.activeCamera = cam; rt.renderList = meshes; rt.renderParticles = false; rt.renderSprites = false;
       for (let k = 0; k < 200 && !rt.isReadyForRendering(); k++) await new Promise((r) => setTimeout(r, 10));
-      rt.render(); await fenceWait(); rt.dispose(); off.forEach((x) => x.setEnabled(false));
+      rt.render(); if (WEBGPU) engine.flushFramebuffer(); await fenceWait(); rt.dispose(); off.forEach((x) => x.setEnabled(false));
       await new Promise((r) => requestAnimationFrame(() => r()));
       warmupProfile.push([m.name, Math.round(performance.now() - matStart), meshes.length]);
     }
@@ -4764,7 +4849,7 @@ void main() {
       const frameStart = performance.now();
       step(label); canvas.style.width = w + 'px'; canvas.style.height = h + 'px'; engine.setSize(w, h);
       for (let q = 0; q < 300 && !scene.isReady(); q++) await new Promise((r) => setTimeout(r, 10));
-      scene.render(); await fenceWait();
+      scene.render(); if (WEBGPU) engine.flushFramebuffer(); await fenceWait();
       await new Promise((r) => requestAnimationFrame(() => r()));
       warmupProfile.push([label, Math.round(performance.now() - frameStart)]);
     }
@@ -4955,20 +5040,21 @@ void main() {
   const startupReport = window.__startupReport = {
     totalMs: Math.round(performance.now()), terrainMs: milestone('terrain tiles uploaded'),
     sceneMs: milestone('ready'), warmupMs: window.__warmupMs || 0,
-    mode: window.__warmupMode || 'none', resources: performance.getEntriesByType('resource').length,
+    mode: window.__warmupMode || 'none', renderer: WEBGPU ? 'WebGPU' : 'WebGL2',
+    resources: performance.getEntriesByType('resource').length,
   };
   try { localStorage.setItem('poStartupLast', JSON.stringify(startupReport)); } catch (_) {}
   if (QS.has('startup')) {
     const box = document.createElement('div'); box.id = 'startupTiming';
     box.style.cssText = 'position:fixed;top:env(safe-area-inset-top,0px);left:50%;transform:translateX(-50%);z-index:60;background:rgba(12,24,33,.88);color:white;padding:5px 10px;border-radius:8px;font:12px system-ui,sans-serif;white-space:nowrap;pointer-events:none';
-    box.textContent = `Load ${(startupReport.totalMs / 1000).toFixed(1)}s · terrain ${(startupReport.terrainMs / 1000).toFixed(1)}s · scene ${(startupReport.sceneMs / 1000).toFixed(1)}s · shaders ${(startupReport.warmupMs / 1000).toFixed(1)}s`;
+    box.textContent = `${startupReport.renderer} · Load ${(startupReport.totalMs / 1000).toFixed(1)}s · terrain ${(startupReport.terrainMs / 1000).toFixed(1)}s · scene ${(startupReport.sceneMs / 1000).toFixed(1)}s · shaders ${(startupReport.warmupMs / 1000).toFixed(1)}s`;
     document.body.appendChild(box);
   }
   releaseGeometry();      // again, for anything built during the warm-up (cheap: released buffers are skipped)
   if (modeChip && !DRIVE) modeChip.textContent = 'Dolomites look-dev · G: look panel · WASD + mouse: fly';
   // frame watchdog: a frame over 250 ms (twice) drops the expensive passes; over 2 s the loop stops rather than keep a hung GPU busy
   let wdLast = performance.now(), wdSlow = 0, wdFrames = 0, wdHung = 0;
-  const SOFT = /swiftshader/i.test((engine.getGlInfo && engine.getGlInfo().renderer) || '');     // software rendering (tests): slow frames are normal, nothing to protect
+  const SOFT = QS.has('softgpu') || /swiftshader/i.test((engine.getGlInfo && engine.getGlInfo().renderer) || '');     // software rendering (tests): slow frames are normal, nothing to protect
   window.__worstFrame = 0;
   engine.runRenderLoop(() => {
     const now = performance.now(), dt = now - wdLast; wdLast = now;
