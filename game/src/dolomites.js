@@ -2276,6 +2276,80 @@ void main() {
     if (b.cls === 'malga') malgas.push({ x: b.c[0], z: b.c[1], yaw, L, W });
   }
   G = G_MAIN;
+  // Riva's residential streets have short walled gardens and planted setbacks
+  // (ref/riva-del-garda 19, 23, 28), rather than uninterrupted grass between blocks.
+  // Batch the small frontage details with static roadside props: no extra draw call.
+  let gardenCount = 0, gardenPathCount = 0;
+  const gardenPoints = []; window.__gardenPoints = gardenPoints;
+  const clearGardenPlot = (b, x, z) => { const a = bldGrid.get(Math.floor(x / 16) + ',' + Math.floor(z / 16)) || [];
+    return a.every(([bx, bz, r]) => (Math.abs(bx - b.c[0]) < 0.1 && Math.abs(bz - b.c[1]) < 0.1) || (x - bx) ** 2 + (z - bz) ** 2 > (r * 0.7 + 0.8) ** 2); };
+  const gardenRoadPoint = (x, z) => { let best = null, d = Infinity; const gx = Math.floor(x / 64), gz = Math.floor(z / 64);
+    for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) for (const p of bRoadGrid.get((gx + i) + ',' + (gz + j)) || []) {
+      const q = (p[0] - x) ** 2 + (p[2] - z) ** 2; if (q < d) { d = q; best = p; } }
+    return best; };
+  const gardenFrontage = (b, o, yaw, L, W, rr) => {
+    if (b.patch !== 'garda' || !['house', 'hotel'].includes(b.cls) || rr > 0.75 || L > 36 || W > 24 || bRoadDist(o[0], o[2]) > 75) return;
+    const c = Math.cos(yaw), s = Math.sin(yaw), world = (x, z) => [o[0] + x * c + z * s, o[2] - x * s + z * c];
+    const options = [];
+    for (const sg of [-1, 1]) {
+      options.push({ x: sg * (W / 2 + 3.3), z: 0, a: yaw + (sg < 0 ? Math.PI : 0), span: L });
+      options.push({ x: 0, z: sg * (L / 2 + 3.3), a: yaw - sg * Math.PI / 2, span: W });
+    }
+    for (const q of options) { const [x, z] = world(q.x, q.z); q.d = bRoadDist(x, z); q.xw = x; q.zw = z; }
+    options.sort((a, b) => a.d - b.d);
+    for (const q of options) {
+      const len = Math.min(12, q.span * 0.8); if (len < 5 || q.d < 7 || q.d > 48 || !clearGardenPlot(b, q.xw, q.zw)) continue;
+      const dzx = Math.sin(q.a), dzz = Math.cos(q.a), e = (sign) => [q.xw + sign * len * 0.5 * dzx, q.zw + sign * len * 0.5 * dzz];
+      const p0 = e(-1), p1 = e(1); if (!clearGardenPlot(b, ...p0) || !clearGardenPlot(b, ...p1)) continue;
+      const h0 = terrainH(...p0), h1 = terrainH(...p1), h = terrainH(q.xw, q.zw);
+      if (Math.max(Math.abs(h - h0), Math.abs(h - h1)) > 0.35) continue;
+      const base = [q.xw, h - 0.06, q.zw], gap = 1.6, seg = (len - gap) / 2, stone = [0.42, 0.4, 0.34, LYR(2)];
+      const solid = rr < 0.22;
+      for (const sg of [-1, 1]) {
+        const zz = sg * (gap / 2 + seg / 2);
+        G.box(base, q.a, 0, solid ? 0.39 : 0.2, zz, 0.12, solid ? 0.39 : 0.2, seg / 2, solid ? townPlaster(b, rr) : stone);
+        if (solid) G.box(base, q.a, 0, 0.81, zz, 0.18, 0.04, seg / 2 + 0.08, stone);
+        else {
+          for (const zRail of [zz - seg / 2, zz, zz + seg / 2]) G.box(base, q.a, 0, 0.62, zRail, 0.035, 0.25, 0.035, C.black);
+          G.box(base, q.a, 0, 0.81, zz, 0.035, 0.035, seg / 2, C.black);
+        }
+        G.box(base, q.a, -0.55, 0.44, zz, 0.38, 0.43, Math.max(0.2, seg / 2 - 0.18), rr < 0.3 ? [0.055, 0.1, 0.035] : [0.08, 0.12, 0.04]);
+      }
+      for (const zz of [-gap / 2, gap / 2]) {
+        G.box(base, q.a, 0, 0.5, zz, 0.19, 0.5, 0.19, stone);
+        G.box(base, q.a, -0.55, 0.2, zz, 0.28, 0.2, 0.28, TERRACOTTA);
+        G.box(base, q.a, -0.55, 0.54, zz, 0.34, 0.25, 0.34, GLEAF);
+      }
+      gardenCount++; gardenPoints.push([q.xw, q.zw]); return [q.xw, q.zw];
+    }
+  };
+  const gardenPath = (b, gate) => {
+    if (!gate) return;
+    const p = gardenRoadPoint(...gate); if (!p) return;
+    const dx = p[0] - gate[0], dz = p[2] - gate[1], d = Math.hypot(dx, dz), len = d - 5;
+    if (len < 7 || len > 38) return;
+    const ux = dx / d, uz = dz / d, n = Math.ceil(len / 2.4), step = len / n, yaw = Math.atan2(ux, uz);
+    for (let i = 0; i <= n; i++) { const x = gate[0] + ux * i * step, z = gate[1] + uz * i * step;
+      if (!clearGardenPlot(b, x, z) || structAt(x, z)) return;
+      if (i && Math.abs(terrainH(x, z) - terrainH(x - ux * step, z - uz * step)) > 0.35) return; }
+    for (let i = 0; i < n; i++) { const t = (i + 0.5) * step, x = gate[0] + ux * t, z = gate[1] + uz * t, h = terrainH(x, z);
+      G.box([x, h, z], yaw, 0, 0.035, 0, 0.9, 0.035, step / 2 + 0.08, [0.43, 0.41, 0.36, LYR(2)]); }
+    gardenPathCount++;
+  };
+  window.__gardenCount = () => ({ gardens: gardenCount, paths: gardenPathCount });
+  // Include gardens around selected simple-massing houses too; most buildings in a
+  // town are simple LODs even when the camera is nearby. Batch these with other
+  // static roadside props so the frontage remains visible during the LOD swap.
+  G = G_MAIN;
+  for (const b of PROPS.buildings) {
+    if (b.patch !== 'garda' || !['house', 'hotel'].includes(b.cls)) continue;
+    const rr = Math.abs((b.c[0] * 7.1 + b.c[1] * 3.7) % 1);
+    if (rr > 0.75 || b.len > 36 || b.wid > 24 || bRoadDist(b.c[0], b.c[1]) > 75) continue;
+    const yaw = Math.PI / 2 - b.ang, L = Math.max(4, b.len), W = Math.max(3.5, b.wid);
+    const g = groundUnder(b.c[0], b.c[1], L, W, yaw);
+    const gate = gardenFrontage(b, [b.c[0], g - 0.4, b.c[1]], yaw, L, W, rr);
+    if (rr < 0.4) gardenPath(b, gate);
+  }
   // the full-detail building, written into the current Geo G: run per 256 m cell when the camera comes near (streamed world phase 2)
   function fullBuilding(b, o, yaw, L, W) {
     const h1 = (b.c[0] * 7.1 + b.c[1] * 3.7) % 1, rr = Math.abs(h1);
@@ -4104,6 +4178,7 @@ void main() {
     // standing at the waterline of the town, looking out across the lake (refs: Riva del Garda05, Torbole 100919 - Spiaggia 04)
     garda_shore_drive: { pos: WS([-6695, 0, -1553]), h: 3.2, look: [-4800 * SCALE, WATER.y + 15, -2800 * SCALE], fov: 66 },
     riva_houses: { pos: WS([-6413, 0, -1180]), h: 3, look: WS([-6430, 8, -1149]), lookGround: true, fov: 66 },
+    riva_garden_review: { pos: [-5120, 0, -959], h: 3.3, look: [-5128.693, 0.8, -948.732], lookGround: true, fov: 50 },
     riva_waterfront: { waterEdge: 'riva', eye: 2.2, turn: -0.35, fov: 66 },
     torbole_beach: { waterEdge: 'torbole', eye: 1.7, turn: 0.95, out: 18, fov: 66 },
   };
