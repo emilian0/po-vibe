@@ -149,6 +149,9 @@
   const ASSETS = new URL('../assets/', location.href), assetUrl = (p) => new URL(p, ASSETS).href;
   const ALL = {
     alfa33:      { name: 'Alfa Romeo 33', blurb: '1992 Series 2 hatchback.' },
+    fiat500e:    { name: 'Fiat 500e', blurb: '2020 electric three-door.' },
+    delta:       { name: 'Lancia Delta Integrale', blurb: '1991 Evoluzione: turbo four, 4WD.' },
+    mc20:        { name: 'Maserati MC20', blurb: '2020 mid-engined V6, butterfly doors.', doors: 'scissor', mid: true },
   };
   const only = (new URLSearchParams(location.search).get('cars') || '').split(',').filter((k) => ALL[k]);
   const IDS = only.length ? only : Object.keys(ALL);

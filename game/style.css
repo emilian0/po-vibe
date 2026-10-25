@@ -83,7 +83,7 @@
 .resume-card button { display: block; width: 100%; min-height: 52px; margin-top: 10px; border: 0; border-radius: 12px;
   background: #e8bb52; color: #172124; font-family: inherit; font-size: 16px; font-weight: 700; line-height: 1.2; }
 .resume-card button[data-resume="no"] { background: #e4eeeb; }
-.touch-actions { position: absolute; left: max(12px, env(safe-area-inset-left)); top: max(10px, env(safe-area-inset-top)); display: flex; gap: 8px; }
+.touch-actions { position: absolute; left: max(12px, env(safe-area-inset-left)); top: max(10px, env(safe-area-inset-top)); display: flex; flex-wrap: wrap; max-width: calc(100vw - 105px); gap: 8px; }
 .touch-actions button { padding: 10px 12px; }
 #fullscreenHint { position: fixed; z-index: 31; top: calc(72px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%);
   width: min(350px, calc(100vw - 24px)); padding: 12px 16px; border-radius: 12px; color: #fff; background: #203035;
@@ -95,5 +95,15 @@
 .corridor-touch .hint, .corridor-touch .help, .corridor-touch .joy { display: none !important; }
 @media (max-width: 500px) {
   .stick-zone { top: 30%; }
-  .corridor-touch .mode { top: calc(70px + env(safe-area-inset-top)); }
+  .corridor-touch .mode { top: calc(118px + env(safe-area-inset-top)); }
 }
+#carChooser { position: fixed; inset: 0; z-index: 35; display: grid; place-items: center; padding: max(18px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left)); background: rgba(9, 18, 23, .72); backdrop-filter: blur(6px); }
+.car-chooser-card { width: min(100%, 480px); max-height: 100%; overflow: auto; padding: 22px; border-radius: 20px; background: #203035; color: #fff; box-shadow: 0 18px 55px rgba(0,0,0,.35); }
+.car-chooser-card h2 { margin: 0 0 5px; font-size: 25px; }
+.car-chooser-card p { margin: 0 0 16px; color: rgba(255,255,255,.75); }
+.car-chooser-list { display: grid; gap: 9px; }
+.car-chooser-list button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 13px 15px; border: 1px solid rgba(255,255,255,.28); border-radius: 13px; background: rgba(255,255,255,.07); color: white; text-align: left; font: inherit; cursor: pointer; }
+.car-chooser-list button.current { border-color: #f2c14e; background: rgba(242,193,78,.16); }
+.car-chooser-list strong { font-size: 17px; }
+.car-chooser-list span { font-size: 13px; color: rgba(255,255,255,.72); }
+.car-chooser-close { margin-top: 14px; width: 100%; padding: 12px; border: 0; border-radius: 12px; background: #f2c14e; color: #17242a; font-family: inherit; font-size: 15px; font-weight: 700; cursor: pointer; }

@@ -49,6 +49,9 @@
   // drivable cars; choose with ?car=<id> or the Car button. Sizes in metres, game frame (+z forward, origin at the wheelbase centre on the ground).
   const CARS = {
     alfa33:   { file: 'cars/alfa33.glb',   name: 'Alfa 33',   desc: 'a red Alfa Romeo 33', vmax: 205, eye: [-0.37, 1.12, -0.25], lamp: [0.52, 0.60, 1.95], ev: false },
+    fiat500e: { file: 'cars/fiat500e.glb', name: 'Fiat 500e', desc: 'a pale blue Fiat 500e', vmax: 150, eye: [-0.37, 1.20, -0.42], lamp: [0.47, 0.72, 1.80], ev: true },
+    delta: { file: 'cars/delta.glb', name: 'Lancia Delta Integrale', desc: 'a white Lancia Delta HF Integrale', vmax: 220, power: 1.0, eye: [-0.37, 1.16, -0.26], lamp: [0.48, 0.69, 1.85], ev: false, redline: 6500, cyl: 4 },
+    mc20: { file: 'cars/mc20.glb', name: 'Maserati MC20', desc: 'a blue Maserati MC20', vmax: 325, power: 1.25, eye: [-0.36, 1.01, -0.12], lamp: [0.63, 0.58, 2.26], ev: false, mid: true, redline: 8000, cyl: 6, doors: 'scissor' },
   };
   const CAR_IDS = Object.keys(CARS), CAR_ID = CARS[new URLSearchParams(location.search).get('car')] ? new URLSearchParams(location.search).get('car') : 'alfa33', CAR = CARS[CAR_ID];
   if (location.protocol === 'file:') { fail('This game has to be served over HTTP. In the repo folder run: python3 -m http.server 8000, then open http://localhost:8000'); return; }

@@ -58,6 +58,17 @@
   window.addEventListener('error', (e) => fail('Something went wrong: ' + (e.message || 'unknown error')));
   window.addEventListener('unhandledrejection', (e) => fail('Something went wrong while loading: ' + ((e.reason && e.reason.message) || e.reason || 'unknown error')));
   const QS = new URLSearchParams(location.search);
+  const CORRIDOR_CARS = {
+    alfa33: { name: 'Alfa Romeo 33', detail: '1992 hatchback · red', vmax: 205, power: 1 },
+    fiat500e: { name: 'Fiat 500e', detail: 'Compact electric · pale blue', vmax: 150, power: 0.8 },
+    delta: { name: 'Lancia Delta Integrale', detail: '1991 rally hatch · white', vmax: 220, power: 1.05 },
+    mc20: { name: 'Maserati MC20', detail: 'Mid-engine sports car · blue', vmax: 325, power: 1.25 },
+  };
+  const CAR_KEY = 'po-dolomites-car';
+  let rememberedCar = null;
+  try { rememberedCar = localStorage.getItem(CAR_KEY); } catch (_) {}
+  const carId = CORRIDOR_CARS[QS.get('car')] ? QS.get('car') : CORRIDOR_CARS[rememberedCar] ? rememberedCar : 'alfa33';
+  const selectedCar = CORRIDOR_CARS[carId];
   // crash breadcrumb (2026-10-19): phones kill the tab without a message. Every loading step and the first frames are written to
   // localStorage, which survives the crash; the next load shows where the last one stopped. Cleared after 300 good frames.
   const CRUMB = { set: (s, extra) => { try { localStorage.setItem('poCrumb', JSON.stringify(Object.assign({ s, t: new Date().toISOString().slice(11, 19) }, CRUMB.ctx, extra || {}))); } catch (_) {} }, ctx: {} };
@@ -4316,12 +4327,12 @@ void main() {
   // ---------- the car, parked on the road for the chase shot ----------
   if (!QS.has('nocar')) {
     try {
-      // the chase cameras never come closer than a few metres: the light model (tools/build_car_lod.sh, ~1/4 of the triangles);
-      // &fullcar loads the showroom model for comparison
-      let res = QS.has('fullcar') ? null : await fetch(assetUrl('cars/alfa33_lod.glb'));
-      if (!res || !res.ok) res = await fetch(assetUrl('cars/alfa33.glb'));
+      // The chase cameras use a quarter-detail model; &fullcar loads the showroom model for comparison.
+      let res = QS.has('fullcar') ? null : await fetch(assetUrl(`cars/${carId}_lod.glb`));
+      if (!res || !res.ok) res = await fetch(assetUrl(`cars/${carId}.glb`));
+      if (!res.ok) throw new Error(`${selectedCar.name} asset: HTTP ${res.status}`);
       const bytes = new Uint8Array(await res.arrayBuffer());
-      mark('car import start'); setLoadStage('Loading the Alfa Romeo'); const r = await BABYLON.ImportMeshAsync(bytes, scene, { pluginExtension: '.glb' }); mark('car imported');
+      mark('car import start'); setLoadStage('Loading ' + selectedCar.name); const r = await BABYLON.ImportMeshAsync(bytes, scene, { pluginExtension: '.glb' }); mark('car imported');
       car = new BABYLON.TransformNode('carRig', scene); r.meshes[0].parent = car;
       // the hood stays shut here: nothing under it can be seen
       const bay = scene.getTransformNodeByName('EngineBay') || scene.getMeshByName('EngineBay');
@@ -4435,7 +4446,8 @@ void main() {
       const pm = new BABYLON.StandardMaterial('maskWhite', scene); pm.disableLighting = true; pm.emissiveColor = new C3(1, 1, 1); pm.backFaceCulling = false;
       proxy.material = pm; proxy.parent = car; proxy.layerMask = 0x20000000; proxy.isPickable = false;
       carMaskRT.renderList = [proxy]; carState.on = 1; mark('car ready');
-    } catch (e) { console.warn('car not loaded', e); }
+      if (!QS.has('shot') && !QS.has('diag')) try { localStorage.setItem(CAR_KEY, carId); } catch (_) {}
+    } catch (e) { console.warn('car not loaded', e); fail('Could not load ' + selectedCar.name + ': ' + e.message); return; }
   }
   // the sun mask camera follows the car; the uniforms go to the terrain and road
   scene.onBeforeRenderObservable.add(() => {
@@ -4490,7 +4502,7 @@ void main() {
   const SAVE_KEY = 'po-dolomites-position-v1';
   const routeStamp = [ROUTE_PTS.length, Math.round(ROUTE_S.at(-1)), Math.round(ROUTE_PTS[0][0]), Math.round(ROUTE_PTS[0][2])].join(':');
   const normalDrive = !['shot', 'diag', 'autodrive', 'at', 'road'].some(k => QS.has(k)) && !(QS.has('touch') && !isTouch);
-  let resumePrompt = null;
+  let resumePrompt = null, savePositionNow = () => {};
   if (DRIVE) {
     physWorld = new CANNON.World(); physWorld.gravity.set(0, -9.81, 0); physWorld.broadphase = new CANNON.SAPBroadphase(physWorld); physWorld.solver.iterations = 10;
     physWorld.defaultContactMaterial.friction = 0.3;
@@ -4526,6 +4538,7 @@ void main() {
         const q = chassis.quaternion;
         try { localStorage.setItem(SAVE_KEY, JSON.stringify({ stamp: routeStamp, i, p: [c.x, c.y, c.z], q: [q.x, q.y, q.z, q.w] })); } catch (_) { /* private browsing may block storage */ }
       };
+      savePositionNow = savePosition;
       window.addEventListener('pagehide', savePosition);
       document.addEventListener('visibilitychange', () => { if (document.hidden) savePosition(); });
       setInterval(savePosition, 5000);       // Safari may suspend a tab without pagehide
@@ -4535,7 +4548,14 @@ void main() {
         Array.isArray(saved.p) && saved.p.length === 3 && saved.p.every(Number.isFinite) && Array.isArray(saved.q) && saved.q.length === 4 && saved.q.every(Number.isFinite) &&
         Math.hypot(saved.p[0] - ROUTE_PTS[saved.i][0], saved.p[2] - ROUTE_PTS[saved.i][2]) < 100 &&
         Math.abs(saved.p[1] - collisionH(saved.p[0], saved.p[2])) < 8;
-      if (valid) {
+      const switchingCar = QS.has('switchcar');
+      if (switchingCar) { const u = new URL(location.href); u.searchParams.delete('switchcar'); history.replaceState(null, '', u.href); }
+      if (valid && switchingCar) {
+        spawnAt(saved.i);
+        chassis.position.set(...saved.p);
+        chassis.quaternion.set(...saved.q);
+        chase.reset = true;
+      } else if (valid) {
         driving = false;
         resumePrompt = document.createElement('div'); resumePrompt.id = 'resumePrompt';
         resumePrompt.innerHTML = '<div class="resume-card" role="dialog" aria-modal="true" aria-labelledby="resumeTitle"><h1 id="resumeTitle">Continue your drive?</h1><p>Your last position is saved on this device.</p><button type="button" data-resume="yes">Continue</button><button type="button" data-resume="no">Start at the beginning</button></div>';
@@ -4660,6 +4680,42 @@ void main() {
       pad.querySelector('[data-action="camera"]').addEventListener('click', cycleCamera);
       pad.querySelector('[data-action="reset"]').addEventListener('click', () => { clear(); resetCar(); });
     }
+    if (!['shot', 'diag', 'autodrive', 'at', 'road'].some(k => QS.has(k))) {
+      // The Po circuit toolbar is not wired in this world. Replace it with a corridor car chooser.
+      const toolbar = document.querySelector('.tools');
+      toolbar.replaceChildren();
+      const carButton = document.createElement('button');
+      carButton.type = 'button'; carButton.id = 'chooseCarBtn'; carButton.textContent = 'Cars';
+      carButton.setAttribute('aria-label', 'Choose a car');
+      (touchDriving ? document.querySelector('#driveTouch .touch-actions') : toolbar).appendChild(carButton);
+      carButton.addEventListener('click', () => {
+        savePositionNow();
+        const wasDriving = driving; driving = false; touchAxis.steer = 0; touchAxis.pedal = 0;
+        for (const key of Object.keys(keys)) keys[key] = false;
+        const chooser = document.createElement('div'); chooser.id = 'carChooser';
+        chooser.innerHTML = '<div class="car-chooser-card" role="dialog" aria-modal="true" aria-labelledby="carChooserTitle"><h2 id="carChooserTitle">Choose your car</h2><p>Continue the drive in a different car.</p><div class="car-chooser-list"></div><button type="button" class="car-chooser-close">Back to drive</button></div>';
+        const list = chooser.querySelector('.car-chooser-list');
+        for (const [id, spec] of Object.entries(CORRIDOR_CARS)) {
+          const option = document.createElement('button'); option.type = 'button'; option.dataset.car = id;
+          option.innerHTML = `<strong>${spec.name}</strong><span>${spec.detail}</span>`;
+          if (id === carId) { option.classList.add('current'); option.setAttribute('aria-current', 'true'); }
+          list.appendChild(option);
+        }
+        const close = () => { chooser.remove(); driving = wasDriving; for (const key of Object.keys(keys)) keys[key] = false; touchAxis.steer = 0; touchAxis.pedal = 0; window.removeEventListener('keydown', onKey); carButton.focus(); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+        chooser.querySelector('.car-chooser-close').addEventListener('click', close);
+        chooser.addEventListener('click', (e) => {
+          const id = e.target.closest('[data-car]')?.dataset.car;
+          if (!CORRIDOR_CARS[id]) return;
+          if (id === carId) { close(); return; }
+          try { localStorage.setItem(CAR_KEY, id); } catch (_) {}
+          const u = new URL(location.href); u.searchParams.set('car', id); u.searchParams.set('switchcar', '1');
+          location.assign(u.href);
+        });
+        document.body.appendChild(chooser); window.addEventListener('keydown', onKey);
+        chooser.querySelector('.car-chooser-close').focus();
+      });
+    }
     mark('controls ready');
     window.addEventListener('blur', () => { for (const key of Object.keys(keys)) keys[key] = false; });
     window.addEventListener('keydown', (e) => {
@@ -4723,7 +4779,7 @@ void main() {
     let eng = 0, brake = 0;
     const pedal = on ? touchAxis.pedal : 0;      // touch pedal stick: up gas, down brake then reverse (analog)
     const thr = AP ? AP.thr : kUp && !kDown ? 1 : Math.max(0, pedal), brk = AP ? AP.brk : kDown ? 1 : Math.max(0, -pedal);
-    if (thr > 0) eng = -2500 * thr * Math.max(0, 1 - Math.pow(kmh / 205, 1.6)) * (vF < -0.5 ? 1.4 : 1);
+    if (thr > 0) eng = -2500 * selectedCar.power * thr * Math.max(0, 1 - Math.pow(kmh / selectedCar.vmax, 1.6)) * (vF < -0.5 ? 1.4 : 1);
     if (brk > 0) { if (vF > 0.8) brake = 60 * brk; else eng = 1100 * brk * Math.max(0, 1 - kmh / 35); }
     if (!thr && !brk) brake = on ? 4 : 0;
     if (!on) { eng = 0; brake = 100; }
@@ -5306,7 +5362,7 @@ void main() {
   });
   const inst = new BABYLON.EngineInstrumentation(engine); inst.captureGPUFrameTime = true;
   const sinst = new BABYLON.SceneInstrumentation(scene); sinst.captureFrameTime = true;
-  window.__dolo = { get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, touchAxis, detailAt, LVL, GLV, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
+  window.__dolo = { carId, get revealIndex() { return revealIndex; }, spawnAt: (i) => spawnAt && spawnAt(i), sightClear, scene, engine, P, PRESETS, SHOTS, setShot, terrainH, collisionH, structAt, get hf() { return hf; }, ROAD, ROADS, buildings: PROPS.buildings, ROUTE_PTS, ROUTE_S, get ROUTE_LANE() { return ROUTE_LANE; }, WORLD, L0, keys, touchKeys, touchAxis, detailAt, LVL, GLV, get chassis() { return chassis; }, get autopilot() { return autopilot; }, physStep: (n) => { for (let i = 0; i < n; i++) driveStep(1 / 60); },
     setPreset: (p) => { Object.assign(P, PRESETS[p]); updateAtmosphere(); applyLook(); },
     set: (o) => { Object.assign(P, o); updateAtmosphere(); applyLook(); },
     get frames() { return frames; }, get nodes() { return nodeCount; },

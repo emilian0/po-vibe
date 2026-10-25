@@ -18,15 +18,17 @@ Data sources and required attributions: [DATA_SOURCES.md](DATA_SOURCES.md)
 
 Run python3 -m http.server 8141 here, then visit http://localhost:8141/.
 WASD/arrows drive, Space handbrake, C camera, R reset, G look panel.
-On touch screens: drag the fixed left steering pad and hold the gas or brake/reverse pedal on the right.
-Camera and reset are above the drive area. Your location is saved on this device; the next visit offers Continue or Start at the beginning.
+On touch screens: use the left steering stick and the right gas/brake stick.
+Camera, reset and Cars are above the drive area. The Cars menu offers Alfa Romeo 33, Fiat 500e,
+Lancia Delta Integrale and Maserati MC20. Switching cars keeps your current location.
+Your location is also saved on this device; the next visit offers Continue or Start at the beginning.
 Landscape is recommended. Add &touch to the game URL to preview touch controls on desktop.
 
 ## Current limits
 
 Touch input and layouts are browser-tested; real-device mobile performance testing is still needed.
 No analytics is configured.
-Libraries and fonts require internet access. The Alfa-only distribution is approximately 275 MB;
+Libraries and fonts require internet access. The four-car distribution is larger than the previous Alfa-only release;
 a play session downloads only the assets it requests.
 
 release.json identifies the source revision. Make changes in the source repository and export
