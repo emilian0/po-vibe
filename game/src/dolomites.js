@@ -314,12 +314,11 @@ bool inTunnelMouth(vec3 p) {
   // medium measured within ~20 MB of low), and the resolution adapts to the GPU anyway
   if (!TIERS[tierName]) tierName = isMobile ? 'medium' : benchMs < 1.0 ? 'ultra' : benchMs < 2.2 ? 'high' : benchMs < 7 ? 'medium' : 'low';     // AMD Radeon Pro 5500M ~3 ms -> medium
   const Q = Object.assign({}, TIERS[tierName]);
-  // phone tuning: the resolution may climb to 2 device px per CSS px, which sharpens a phone screen more than MSAA would. 4x MSAA was
-  // off on phones while memory was tight (the phone crashed with it at ~930 MB); with the streamed world (~300 MB at phone size,
-  // 2026-10-19) it is back on: smooth edges on trees, roofs and the road, and alpha-to-coverage foliage. &q.msaa=1 turns it off.
+  // Phone medium uses FXAA at the native display resolution. On the local AMD GPU, 4x MSAA cost about 5 ms at 1200x750;
+  // the adaptive resolution floor stays at one rendered pixel per CSS pixel. &q.msaa=4 restores the previous setting.
   // Start above CSS resolution and keep the adaptive floor at 1x. The old 0.6x floor enlarged each rendered pixel
   // across several display pixels on Retina phones. The frame-time controller still reduces resolution before dropping FPS.
-  if (isMobile && tierName === 'medium') { Q.scale = [1.0, DPR, Math.min(DPR, 1.25)]; }
+  if (isMobile && tierName === 'medium') { Q.scale = [1.0, DPR, Math.min(DPR, 1.25)]; Q.msaa = 1; }
   for (const [k, v] of QS) if (k.startsWith('q.') && k.slice(2) in Q && !Array.isArray(Q[k.slice(2)])) Q[k.slice(2)] = +v;      // test overrides, e.g. &q.msaa=1
   const SAFE = { on: false };     // set by the frame watchdog: drops the expensive passes after very long frames
   console.log('GPU benchmark', benchMs.toFixed(2), 'ms ->', tierName);
@@ -4360,13 +4359,12 @@ void main() {
       scene.environmentTexture = probe.cubeTexture; scene.environmentIntensity = 0.55;
       for (const mt of scene.materials) if (mt.getClassName && mt.getClassName() === 'PBRMaterial') { mt.realTimeFiltering = true; mt.realTimeFilteringQuality = BABYLON.Constants.TEXTURE_FILTERING_QUALITY_LOW; }
       }
-      // the parked car is scenery here: no refraction pass (it re-renders the whole terrain) and merged parts (~900 draws -> a few dozen)
-      // glass keeps real refraction, but what it refracts is cheap: the car itself, the road, the sky and the coarse terrain stand-in
-      // (the full terrain in that pass cost ~14 ms); every frame. 1024 px on every tier (2026-10-19): the target spans the whole screen,
-      // so 256-512 px showed stair steps in the windows on a phone's ~1700 px wide canvas
+      // WebGPU car: batch small trim materials and blend the dark windows instead of re-rendering the scene into a
+      // 1024 px refraction target each frame. &carfullfx restores the earlier material and glass path for comparison.
+      const fastCar = WEBGPU && !QS.has('carfullfx');
       {
         const th = scene._transmissionHelper;
-        if (th && th._opaqueRenderTarget && !QS.has('noglass') && Q.glass) {
+        if (th && th._opaqueRenderTarget && !QS.has('noglass') && !fastCar && Q.glass) {
           if (th.setOptions) th.setOptions({ renderSize: Q.glass, samples: 1 }); else if (th._options && th._setupRenderTargets) { th._options.renderSize = Q.glass; th._options.samples = 1; th._setupRenderTargets(); }
           const rt = th._opaqueRenderTarget;
           const isGlass = (m) => m.material && m.material.subSurface && m.material.subSurface.isRefractionEnabled;
@@ -4378,9 +4376,44 @@ void main() {
           rt.onBeforeRenderObservable.add(() => { apply(); proxyMeshes.forEach((m) => m.setEnabled(true)); });
           rt.onAfterRenderObservable.add(() => proxyMeshes.forEach((m) => m.setEnabled(false)));
           setTimeout(() => { cached = null; }, 3000);      // after the merge
-        } else if (th) { for (const mt of scene.materials) if (mt.subSurface && mt.subSurface.isRefractionEnabled) { mt.subSurface.isRefractionEnabled = false; mt.alpha = 0.5; mt.albedoColor = new C3(0.02, 0.025, 0.03); } th.dispose(); scene._transmissionHelper = null; }
+        } else if (th) { for (const mt of scene.materials) if (mt.subSurface && mt.subSurface.isRefractionEnabled) {
+          mt.subSurface.isRefractionEnabled = false;
+          if (QS.has('noglass') || mt.name === 'Glass' || mt.name === 'DarkGlass') {
+            mt.alpha = fastCar && !QS.has('noglass') ? 0.28 : 0.5;
+            mt.albedoColor = new C3(0.02, 0.025, 0.03);
+            if (fastCar && !QS.has('noglass')) mt.transparencyMode = BABYLON.PBRMaterial.PBRMATERIAL_ALPHABLEND;
+          }
+        } th.dispose(); scene._transmissionHelper = null; }
       }
       // merge by material, but keep each wheel separate so it can spin and steer
+      if (fastCar) {
+        const mk = (name, metallic, roughness) => {
+          const mt = new BABYLON.PBRMaterial(name, scene);
+          mt.albedoColor = new C3(1, 1, 1); mt.metallic = metallic; mt.roughness = roughness;
+          return mt;
+        };
+        const shared = { dark: mk('carDarkBatch', 0, 0.67), metal: mk('carMetalBatch', 0.82, 0.24), lamp: mk('carLampBatch', 0.1, 0.18) };
+        const dark = new Set(['Rubber', 'EngineBlack', 'BlackTrim', 'GrilleMesh', 'Carpet', 'DoorCard', 'Interior', 'Headliner', 'Leather', 'Tire', 'Hose', 'Battery', 'PlasticTrans', 'RadiatorCore']);
+        const metal = new Set(['Chrome', 'ReflectorFacet', 'Reflector', 'Alloy', 'Copper', 'Cast', 'Rim']);
+        const lamp = new Set(['Lens_Head', 'Bulb_Head', 'Bulb_Amber', 'Lens_Amber', 'Lens_Red', 'Bulb_Tail', 'Lens_Reverse', 'Bulb_Reverse', 'Plate', 'WireRed', 'Needle']);
+        for (const m of r.meshes) {
+          if (!m.material || !m.getVerticesDataKinds || !m.getTotalVertices || m.getTotalVertices() === 0) continue;
+          const old = m.material, name = old.name;
+          const group = dark.has(name) ? shared.dark : metal.has(name) ? shared.metal : lamp.has(name) ? shared.lamp : null;
+          if (!group) continue;
+          const n = m.getTotalVertices(), src = m.getVerticesData('color'), size = m.getVertexBuffer('color')?.getSize() || 4;
+          const tint = old.albedoColor || C3.White(), colors = new Float32Array(n * 4);
+          for (let i = 0; i < n; i++) {
+            colors[i * 4] = (src ? src[i * size] : 1) * tint.r;
+            colors[i * 4 + 1] = (src ? src[i * size + 1] : 1) * tint.g;
+            colors[i * 4 + 2] = (src ? src[i * size + 2] : 1) * tint.b;
+            colors[i * 4 + 3] = src && size > 3 ? src[i * size + 3] : 1;
+          }
+          m.setVerticesData('color', colors, false, 4);
+          if (m.getVerticesDataKinds().includes('uv')) m.removeVerticesData('uv');
+          m.material = group;
+        }
+      }
       mark('merge start'); const groups = new Map();
       for (const m of r.meshes) { if (!m.material || !m.getVerticesDataKinds || !m.getTotalVertices || m.getTotalVertices() === 0 || (m.instances && m.instances.length)) continue;      // instances (shared meshes) stay as they are
         let owner = null; for (let n = m.parent; n; n = n.parent) if (/^Wheel_(FL|FR|RL|RR)$/.test(n.name)) { owner = n; break; }
@@ -4774,7 +4807,8 @@ void main() {
   const fpsChip = isMobile && !QS.has('shot') ? document.body.appendChild(Object.assign(document.createElement('div'), { id: 'fpsChip', textContent: '– fps' })) : null;
   { let n = 0, t0 = performance.now(); scene.onAfterRenderObservable.add(() => { n++; const t = performance.now(); if (t - t0 < 500) return;
       const el = document.getElementById('fpsLine'); if (el) { const fps = n * 1000 / (t - t0); el.innerHTML = `<b>${fps.toFixed(0)} fps</b> · ${(1000 / fps).toFixed(1)} ms/frame · render scale ${(1 / engine.getHardwareScalingLevel()).toFixed(2)}`; }
-      if (fpsChip) fpsChip.textContent = Math.round(n * 1000 / (t - t0)) + ' fps · ' + renderScale.toFixed(2) + '×';
+      if (fpsChip) fpsChip.textContent = Math.round(n * 1000 / (t - t0)) + ' fps · ' + renderScale.toFixed(2) + '×' +
+        (QS.has('perf') ? ` · ${WEBGPU ? 'WebGPU' : 'WebGL2'} · ${engine.getRenderWidth()}×${engine.getRenderHeight()} · AA${Q.msaa}` : '');
       n = 0; t0 = t; }); }
 
   updateAtmosphere(); applyLook();
@@ -4993,18 +5027,43 @@ void main() {
         engine.setSize(w, h);
         for (let n = 0; n < 300 && !scene.isReady(); n++) await new Promise((r) => setTimeout(r, 10));
         post({ ev: 'frame-start', size: [w, h] });
-        const t = performance.now(); scene.render(); engine.flushFramebuffer();
+        const t = performance.now(); scene.render();
+        const cpuMs = Math.round(performance.now() - t);
+        engine.flushFramebuffer();
+        const submitMs = Math.round(performance.now() - t);
         const waited = await Promise.race([
           engine._device.queue.onSubmittedWorkDone().then(() => true),
           new Promise((r) => setTimeout(() => r(false), 12000)),
         ]);
         const ms = Math.round(performance.now() - t);
-        report.frames.push({ size: [w, h], ms, submitted: waited }); post({ ev: 'frame-end', size: [w, h], ms, submitted: waited });
+        const frame = { size: [w, h], ms, cpuMs, submitMs, submitted: waited,
+          activeKTris: Math.round(scene.getActiveIndices() / 3000), draws: engine._drawCalls?.current ?? null,
+          shadowJobs: shadowJobs.length };
+        report.frames.push(frame); post({ ev: 'frame-end', ...frame });
         if (!waited) { report.stopped = 'GPU queue did not finish within 12 s'; break; }
         if (i + 1 < sizes.length) {
           const [nw, nh] = sizes[i + 1], predicted = ms * nw * nh / (w * h);
           if (predicted > 750 && !QS.has('softgpu')) { report.stopped = `next frame predicted ${Math.round(predicted)} ms`; break; }
         }
+      }
+      // Optional steady-state sample after the guarded size ramp. Each frame is
+      // fenced and the loop stops on a slow submission before queuing another.
+      const extra = Math.min(30, Math.max(0, +(QS.get('diagframes') || 0)));
+      for (let i = 0; i < extra && !report.stopped; i++) {
+        const t = performance.now(); scene.render();
+        const cpuMs = Math.round(performance.now() - t);
+        engine.flushFramebuffer();
+        const submitMs = Math.round(performance.now() - t);
+        const waited = await Promise.race([
+          engine._device.queue.onSubmittedWorkDone().then(() => true),
+          new Promise((r) => setTimeout(() => r(false), 12000)),
+        ]);
+        const ms = Math.round(performance.now() - t);
+        const frame = { size: [engine.getRenderWidth(), engine.getRenderHeight()], ms, cpuMs, submitMs, submitted: waited,
+          activeKTris: Math.round(scene.getActiveIndices() / 3000), draws: engine._drawCalls?.current ?? null,
+          shadowJobs: shadowJobs.length };
+        report.frames.push(frame); post({ ev: 'steady-frame', ...frame });
+        if (!waited || ms > 250) report.stopped = !waited ? 'GPU queue did not finish within 12 s' : `steady frame took ${ms} ms`;
       }
       post({ ev: report.stopped ? 'safe-stop' : 'diag-complete', report });
     } catch (e) { report.stopped = String(e); post({ ev: 'error', msg: report.stopped }); }
@@ -5252,5 +5311,5 @@ void main() {
     set: (o) => { Object.assign(P, o); updateAtmosphere(); applyLook(); },
     get frames() { return frames; }, get nodes() { return nodeCount; },
     stats: () => { let tex = 0; for (const t of scene.textures) { const it = t.getInternalTexture && t.getInternalTexture(); if (it) tex += it.width * it.height * (it.type === 1 ? 16 : 4) * (it.is3D ? it.depth : 1) * (it.isCube ? 6 : 1); }
-      return { tier: tierName, bench: +benchMs.toFixed(2), scale: renderScale, gpuMs: +(inst.gpuFrameTimeCounter.lastSecAverage / 1e6).toFixed(2), cpuMs: +sinst.frameTimeCounter.lastSecAverage.toFixed(2), draws: sinst.drawCallsCounter.current, terrainKTris: Math.round(nodeCount * GRID * GRID * 2 / 1000), activeKTris: Math.round(scene.getActiveIndices() / 3 / 1000), nodes: nodeCount, gpuMB: Math.round(tex / 1048576) }; } };
+      return { renderer: WEBGPU ? 'WebGPU' : 'WebGL2', tier: tierName, msaa: Q.msaa, canvas: [engine.getRenderWidth(), engine.getRenderHeight()], bench: +benchMs.toFixed(2), scale: renderScale, gpuMs: +(inst.gpuFrameTimeCounter.lastSecAverage / 1e6).toFixed(2), cpuMs: +sinst.frameTimeCounter.lastSecAverage.toFixed(2), draws: sinst.drawCallsCounter.current, terrainKTris: Math.round(nodeCount * GRID * GRID * 2 / 1000), activeKTris: Math.round(scene.getActiveIndices() / 3 / 1000), nodes: nodeCount, gpuMB: Math.round(tex / 1048576) }; } };
 })();
