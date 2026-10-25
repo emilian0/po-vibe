@@ -72,6 +72,10 @@
 .stick-label { position: absolute; bottom: max(10px, env(safe-area-inset-bottom)); left: 0; right: 0; text-align: center;
   font-size: 11px; font-weight: 700; letter-spacing: .08em; color: rgba(255,255,255,.7); text-shadow: 0 1px 3px rgba(0,0,0,.6); pointer-events: none; }
 #driveTouch button[hidden] { display: none; }
+#chooseCarBtn { position: fixed; z-index: 32; top: calc(54px + env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px));
+  min-height: 48px; padding: 9px 15px; border: 2px solid rgba(255,255,255,.7); border-radius: 16px;
+  color: #fff; background: rgba(18, 26, 29, .82); box-shadow: 0 3px 14px rgba(0,0,0,.25);
+  font-family: inherit; font-size: 15px; font-weight: 700; line-height: 1.2; cursor: pointer; touch-action: manipulation; }
 #fpsChip { position: fixed; z-index: 13; right: max(10px, env(safe-area-inset-right)); top: max(10px, env(safe-area-inset-top)); pointer-events: none;
   padding: 4px 8px; border-radius: 8px; background: rgba(20, 26, 22, 0.45); color: #f4f6f2; font: 600 13px/1 inherit; font-family: inherit; font-variant-numeric: tabular-nums; }
 #resumePrompt { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px;

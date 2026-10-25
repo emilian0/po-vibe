@@ -19,7 +19,7 @@ Data sources and required attributions: [DATA_SOURCES.md](DATA_SOURCES.md)
 Run python3 -m http.server 8141 here, then visit http://localhost:8141/.
 WASD/arrows drive, Space handbrake, C camera, R reset, G look panel.
 On touch screens: use the left steering stick and the right gas/brake stick.
-Camera, reset and Cars are above the drive area. The Cars menu offers Alfa Romeo 33, Fiat 500e,
+Camera and reset are above the drive area. The persistent Change car button offers Alfa Romeo 33, Fiat 500e,
 Lancia Delta Integrale and Maserati MC20. Switching cars keeps your current location.
 Your location is also saved on this device; the next visit offers Continue or Start at the beginning.
 Landscape is recommended. Add &touch to the game URL to preview touch controls on desktop.

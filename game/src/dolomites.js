@@ -4531,15 +4531,15 @@ void main() {
     mark('spawn'); spawnAt(startI); mark('spawned');
     driving = true;
     if (normalDrive) {
-      const savePosition = () => {
-        if (resumePrompt || !driving || !chassis) return;
+      const savePosition = (force = false) => {
+        if (resumePrompt || (!driving && !force) || !chassis) return;
         const c = chassis.position, i = roadIndexNear(c.x, c.z), rp = ROUTE_PTS[i];
         if (Math.hypot(c.x - rp[0], c.z - rp[2]) > 100 || Math.abs(c.y - collisionH(c.x, c.z)) > 8) return;
         const q = chassis.quaternion;
         try { localStorage.setItem(SAVE_KEY, JSON.stringify({ stamp: routeStamp, i, p: [c.x, c.y, c.z], q: [q.x, q.y, q.z, q.w] })); } catch (_) { /* private browsing may block storage */ }
       };
-      savePositionNow = savePosition;
-      window.addEventListener('pagehide', savePosition);
+      savePositionNow = () => savePosition(true);
+      window.addEventListener('pagehide', () => savePosition());
       document.addEventListener('visibilitychange', () => { if (document.hidden) savePosition(); });
       setInterval(savePosition, 5000);       // Safari may suspend a tab without pagehide
       let saved = null;
@@ -4685,9 +4685,9 @@ void main() {
       const toolbar = document.querySelector('.tools');
       toolbar.replaceChildren();
       const carButton = document.createElement('button');
-      carButton.type = 'button'; carButton.id = 'chooseCarBtn'; carButton.textContent = 'Cars';
+      carButton.type = 'button'; carButton.id = 'chooseCarBtn'; carButton.textContent = 'Change car';
       carButton.setAttribute('aria-label', 'Choose a car');
-      (touchDriving ? document.querySelector('#driveTouch .touch-actions') : toolbar).appendChild(carButton);
+      document.body.appendChild(carButton);
       carButton.addEventListener('click', () => {
         savePositionNow();
         const wasDriving = driving; driving = false; touchAxis.steer = 0; touchAxis.pedal = 0;
@@ -4709,7 +4709,8 @@ void main() {
           if (!CORRIDOR_CARS[id]) return;
           if (id === carId) { close(); return; }
           try { localStorage.setItem(CAR_KEY, id); } catch (_) {}
-          const u = new URL(location.href); u.searchParams.set('car', id); u.searchParams.set('switchcar', '1');
+          const u = new URL(location.href); u.searchParams.set('car', id);
+          if (!resumePrompt) u.searchParams.set('switchcar', '1');
           location.assign(u.href);
         });
         document.body.appendChild(chooser); window.addEventListener('keydown', onKey);
