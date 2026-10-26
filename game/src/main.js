@@ -50,10 +50,15 @@
   const CARS = {
     alfa33:   { file: 'cars/alfa33.glb',   name: 'Alfa 33',   desc: 'a red Alfa Romeo 33', vmax: 205, eye: [-0.37, 1.12, -0.25], lamp: [0.52, 0.60, 1.95], ev: false },
     fiat500e: { file: 'cars/fiat500e.glb', name: 'Fiat 500e', desc: 'a pale blue Fiat 500e', vmax: 150, eye: [-0.37, 1.20, -0.42], lamp: [0.47, 0.72, 1.80], ev: true },
-    delta: { file: 'cars/delta.glb', name: 'Lancia Delta Integrale', desc: 'a white Lancia Delta HF Integrale', vmax: 220, power: 1.0, eye: [-0.37, 1.16, -0.26], lamp: [0.48, 0.69, 1.85], ev: false, redline: 6500, cyl: 4 },
     mc20: { file: 'cars/mc20.glb', name: 'Maserati MC20', desc: 'a blue Maserati MC20', vmax: 325, power: 1.25, eye: [-0.36, 1.01, -0.12], lamp: [0.63, 0.58, 2.26], ev: false, mid: true, redline: 8000, cyl: 6, doors: 'scissor' },
+    atv: { file: 'cars/atv.glb', name: 'Alpine ATV', desc: 'an orange all-terrain quad', vmax: 65, power: 0.7, eye: [-0.2, 1.55, -0.2], lamp: [0, 0.87, 1.1], ev: false },
   };
   const CAR_IDS = Object.keys(CARS), CAR_ID = CARS[new URLSearchParams(location.search).get('car')] ? new URLSearchParams(location.search).get('car') : 'alfa33', CAR = CARS[CAR_ID];
+  const carDynamics = window.PO_CAR_DYNAMICS?.[CAR_ID] || {
+    mass: 1000, drive: CAR.mid ? 'rear' : 'front', driveForce: 5000 * (CAR.power || 1), reverseForce: 2200,
+    brake: 60, coastBrake: 4, drag: 0.45, grip: 3.2, throttleRise: 6, throttleFall: 8,
+    steerLow: 0.42, steerHigh: 0.09, steerFadeKmh: 130,
+  };
   if (location.protocol === 'file:') { fail('This game has to be served over HTTP. In the repo folder run: python3 -m http.server 8000, then open http://localhost:8000'); return; }
   let TRACK;
   try { const r = await fetch(assetUrl('maps/po-valley/track.json')); if (!r.ok) throw new Error(r.status); TRACK = await r.json(); }
@@ -1309,14 +1314,14 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     }
     steerWheel = scene.getTransformNodeByName('SteeringWheel');
     if (steerWheel) { if (!steerWheel.rotationQuaternion) steerWheel.rotationQuaternion = BABYLON.Quaternion.Identity(); steerWheelRest = steerWheel.rotationQuaternion.clone(); }
-    chassis = new CANNON.Body({ mass: 1000, material: bodyMat }); chassis.addShape(new CANNON.Box(new CANNON.Vec3(halfTrack + 0.05, 0.3, bodyLen / 2 - 0.06)), new CANNON.Vec3(0, 0.1, bodyMid));
+    chassis = new CANNON.Body({ mass: carDynamics.mass, material: bodyMat }); chassis.addShape(new CANNON.Box(new CANNON.Vec3(halfTrack + 0.05, 0.3, bodyLen / 2 - 0.06)), new CANNON.Vec3(0, 0.1, bodyMid));
     chassis.angularDamping = 0.4; world.addBody(chassis);
     vehicle = new CANNON.RaycastVehicle({ chassisBody: chassis, indexRightAxis: 0, indexUpAxis: 1, indexForwardAxis: 2 });
     for (const k of ['FL', 'FR', 'RL', 'RR']) {
       const n = scene.getTransformNodeByName('Wheel_' + k); if (!n.rotationQuaternion) n.rotationQuaternion = BABYLON.Quaternion.Identity();
       n.computeWorldMatrix(true); const wp = n.getAbsolutePosition(), r = Math.max(0.2, wp.y);     // staggered tyres: each wheel keeps its own radius
       wheels.push({ key: k, node: n, front: k[0] === 'F', r, spin: 0 });
-      vehicle.addWheel({ radius: r, directionLocal: new CANNON.Vec3(0, -1, 0), suspensionStiffness: K, suspensionRestLength: 0.30, frictionSlip: 3.2,
+      vehicle.addWheel({ radius: r, directionLocal: new CANNON.Vec3(0, -1, 0), suspensionStiffness: K, suspensionRestLength: 0.30, frictionSlip: carDynamics.grip,
         dampingRelaxation: 2.3, dampingCompression: 4.4, maxSuspensionForce: 200000, rollInfluence: 0.05, axleLocal: new CANNON.Vec3(1, 0, 0),
         chassisConnectionPointLocal: new CANNON.Vec3(wp.x, -0.06 + (r - WR), wp.z), maxSuspensionTravel: 0.2, customSlidingRotationalSpeed: -30, useCustomSlidingRotationalSpeed: true });
     }
@@ -1568,7 +1573,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     beams.forEach((b) => (b.light.intensity = lightsOn ? 40 : 0));
     say(lightsOn ? 'Lights on' : 'Lights off');
   };
-  const resetCar = () => { if (!chassis) return; const ns = nearestSample(chassis.position.x, chassis.position.z, 6); spawnAt(ns ? ns.i : 0); say('Car reset onto the road'); };
+  const resetCar = () => { if (!chassis) return; const ns = nearestSample(chassis.position.x, chassis.position.z, 6); spawnAt(ns ? ns.i : 0); throttleBlend = 0; say('Car reset onto the road'); };
   { const sel = $('carSel');                                             // garage: switching car reloads the page with ?car=
     for (const id of CAR_IDS) { const o = document.createElement('option'); o.value = id; o.textContent = CARS[id].name; if (id === CAR_ID) o.selected = true; sel.appendChild(o); }
     sel.addEventListener('change', () => { const u = new URL(location.href); u.searchParams.set('car', sel.value); location.href = u.href; });
@@ -1580,7 +1585,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   $('hornBtn').addEventListener('pointerdown', (e) => { e.preventDefault(); startAudio(); horn(true); }); ['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) => $('hornBtn').addEventListener(ev, () => horn(false)));
 
   // ---------- simulation + camera ----------
-  let steer = 0, lapStart = performance.now(), best = null, lastIdx = 0, lapArmed = false;
+  let steer = 0, throttleBlend = 0, lapStart = performance.now(), best = null, lastIdx = 0, lapArmed = false;
   const fmt = (ms) => { const s = ms / 1000; return Math.floor(s / 60) + ':' + (s % 60).toFixed(1).padStart(4, '0'); };
   const fwdV = new CANNON.Vec3(), tmpQ = new BABYLON.Quaternion();
   const drive = (dt, sim) => {
@@ -1593,20 +1598,24 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     const curve = (v) => Math.sign(v) * Math.pow(Math.abs(v), 1.7);          // fine control around the centre of the stick
     const jx = on ? curve(dz(joy.x)) : 0, jy = on ? joy.y : 0;
     const thr = kUp ? 1 : Math.max(0, dz(-jy)), brk = kDown ? 1 : Math.max(0, dz(jy));
-    const maxSteer = lerp(0.42, 0.09, Math.min(1, kmh / 130));
+    const maxSteer = lerp(carDynamics.steerLow, carDynamics.steerHigh, Math.min(1, kmh / carDynamics.steerFadeKmh));
     const target = Math.max(-1, Math.min(1, (kR ? 1 : 0) - (kL ? 1 : 0) + jx)) * maxSteer;
     steer += (target - steer) * Math.min(1, dt * (target === 0 ? 4.0 : 2.4));
     let eng = 0, brake = 0;
-    if (thr > 0) eng = -2500 * (CAR.power || 1) * thr * Math.max(0, 1 - Math.pow(kmh / CAR.vmax, 1.6)) * (vF < -0.5 ? 1.4 : 1);   // forward drive also cancels a roll backwards
-    if (brk > 0) { if (vF > 0.8) brake = 60 * brk; else eng = 1100 * brk * Math.max(0, 1 - kmh / 35); }
-    if (thr === 0 && brk === 0) brake = on ? 4 : 0;
-    if (!on) { eng = 0; brake = 100; }
+    const requestedThrottle = brk > 0 ? 0 : thr;
+    throttleBlend += (requestedThrottle - throttleBlend) * Math.min(1, dt * (requestedThrottle > throttleBlend ? carDynamics.throttleRise : carDynamics.throttleFall));
+    const drivenWheels = carDynamics.drive === 'all' ? 4 : 2;
+    if (throttleBlend > 0) eng = -carDynamics.driveForce / drivenWheels * throttleBlend * Math.max(0, 1 - Math.pow(kmh / CAR.vmax, 1.6)) * (vF < -0.5 ? 1.4 : 1);
+    if (brk > 0) { if (vF > 0.8) brake = carDynamics.brake * brk; else eng = carDynamics.reverseForce / drivenWheels * brk * Math.max(0, 1 - kmh / 35); }
+    if (thr === 0 && brk === 0) brake = on ? carDynamics.coastBrake : 0;
+    if (!on) { eng = 0; brake = 100; throttleBlend = 0; }
     for (let w = 0; w < 4; w++) {
-      vehicle.applyEngineForce(w < 2 ? eng : 0, w);
+      const driven = carDynamics.drive === 'all' || (carDynamics.drive === 'front' ? w < 2 : w >= 2);
+      vehicle.applyEngineForce(driven ? eng : 0, w);
       vehicle.setBrake(hand && w >= 2 ? (on ? 120 : 100) : brake, w);
     }
     vehicle.setSteeringValue(steer, 0); vehicle.setSteeringValue(steer, 1);
-    const sp = chassis.velocity.norm(); chassis.applyForce(chassis.velocity.scale(-0.45 * sp), chassis.position);
+    const sp = chassis.velocity.norm(); chassis.applyForce(chassis.velocity.scale(-carDynamics.drag * sp), chassis.position);
     const tPhys = performance.now();
     if (sim) world.step(1 / 60); else world.step(1 / 60, dt, 3);
     if (typeof perfAdd === 'function') perfAdd('physics (cannon)', performance.now() - tPhys);

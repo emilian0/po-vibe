@@ -61,14 +61,15 @@
   const CORRIDOR_CARS = {
     alfa33: { name: 'Alfa Romeo 33', detail: '1992 hatchback · red', vmax: 205, power: 1 },
     fiat500e: { name: 'Fiat 500e', detail: 'Compact electric · pale blue', vmax: 150, power: 0.8 },
-    delta: { name: 'Lancia Delta Integrale', detail: '1991 rally hatch · white', vmax: 220, power: 1.05 },
     mc20: { name: 'Maserati MC20', detail: 'Mid-engine sports car · blue', vmax: 325, power: 1.25 },
+    atv: { name: 'Alpine ATV', detail: 'All-wheel drive · stream trails', vmax: 65, power: 0.7, offroad: true },
   };
   const CAR_KEY = 'po-dolomites-car';
   let rememberedCar = null;
   try { rememberedCar = localStorage.getItem(CAR_KEY); } catch (_) {}
   const carId = CORRIDOR_CARS[QS.get('car')] ? QS.get('car') : CORRIDOR_CARS[rememberedCar] ? rememberedCar : 'alfa33';
   const selectedCar = CORRIDOR_CARS[carId];
+  const carDynamics = window.PO_CAR_DYNAMICS[carId];
   // crash breadcrumb (2026-10-19): phones kill the tab without a message. Every loading step and the first frames are written to
   // localStorage, which survives the crash; the next load shows where the last one stopped. Cleared after 300 good frames.
   const CRUMB = { set: (s, extra) => { try { localStorage.setItem('poCrumb', JSON.stringify(Object.assign({ s, t: new Date().toISOString().slice(11, 19) }, CRUMB.ctx, extra || {}))); } catch (_) {} }, ctx: {} };
@@ -3448,13 +3449,13 @@ void main() {
   vec4 tA = texture2D(waterTex, vec2(q.x / 2.2, (q.y - tt * speed) / 1.4));
   vec4 tB = texture2D(waterTex, vec2(q.x / 1.1 + 0.37, (q.y - tt * speed * 1.4) / 0.75));
   vec4 tC = texture2D(waterTex, mat2(0.8, -0.6, 0.6, 0.8) * vec2(q.x / 1.7, (q.y - tt * speed * 0.8) / 1.9) + 0.61);      // a third layer at an angle: no aligned stripes
-  vec2 nn = (tA.rg * 2.0 - 1.0) * 0.45 + (tB.rg * 2.0 - 1.0) * 0.3 + (tC.rg * 2.0 - 1.0) * 0.25;
-  float rough = 0.35 + clamp(slope * 4.0, 0.0, 0.9);
+  vec2 nn = (tA.rg * 2.0 - 1.0) * 0.40 + (tB.rg * 2.0 - 1.0) * 0.20 + (tC.rg * 2.0 - 1.0) * 0.15;
+  float rough = 0.28 + clamp(slope * 2.0, 0.0, 0.5);
   vec3 N = normalize(vec3(nn.x * rough, 1.0, nn.y * rough));
   vec3 V = normalize(camPos - vPos);
   float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
   vec3 R = reflect(-V, N);
-  vec3 sky = skyL(normalize(vec3(R.x, max(R.y, 0.02), R.z)));
+  vec3 sky = min(skyL(normalize(vec3(R.x, max(R.y, 0.02), R.z))), vec3(0.28, 0.37, 0.40));
   float sh = (sunShadow(vPos.xz) * cloudShade(vPos));
   vec3 lit = (sunCol * max(sunDir.y, 0.0) * sh + ambient(vec3(0.0, 1.0, 0.0))) / PI;
   // the water body: clear over pale stones at the edges, glacial green in the deeper middle (refs 12-14)
@@ -3464,19 +3465,19 @@ void main() {
   // sun glints with normal-variance filtering: where the ripple normals change fast on screen (far, or rough fast water) the
   // highlight widens and dims into a sheen instead of single-pixel sparkles (the 'glitter')
   float rgh = clamp(length(fwidth(nn)) * 5.0 + clamp(slope, 0.0, 0.4) * 1.5, 0.0, 1.0), gp = mix(160.0, 10.0, rgh);
-  float glint = pow(max(dot(R, sunDir), 0.0), gp) * (gp / 160.0) * 3.0 * sh;
+  float glint = pow(max(dot(R, sunDir), 0.0), gp) * (gp / 160.0) * 0.08 * sh;
   // foam: where the stream drops, carried with the current, and a thin line at the banks of the faster stretches
   // foam streaks drawn out along the flow (not specks); the threshold is widened by the pattern's screen-space rate (fwidth),
   // so far foam blurs into soft white instead of sparkling
   float fm = texture2D(waterTex, vec2(q.x / 1.4 + 0.2, (q.y - tt * speed * 1.15) / 6.5)).b * 0.6 + texture2D(waterTex, vec2(q.x / 0.7 + 0.5, (q.y - tt * speed * 1.4) / 3.2)).b * 0.4;
   float dist = distance(vPos, camPos), patchy = smoothstep(0.35, 0.75, texture2D(waterTex, vec2(q.x / 6.0, (q.y - tt * speed * 0.5) / 9.0) + 0.27).b);
-  float foamAmt = (clamp((slope - 0.07) * 2.4, 0.0, 0.45) * (0.4 + 0.6 * patchy) + smoothstep(0.8, 1.0, a) * clamp(slope * 2.0, 0.0, 0.2)) * (1.0 - smoothstep(60.0, 220.0, dist));
+  float foamAmt = (clamp((slope - 0.07) * 1.65, 0.0, 0.30) * (0.4 + 0.6 * patchy) + smoothstep(0.8, 1.0, a) * clamp(slope * 1.3, 0.0, 0.12)) * (1.0 - smoothstep(60.0, 220.0, dist));
   float fw = fwidth(fm) * 1.8;
   float foam = smoothstep(1.0 - foamAmt - fw, 1.0 - foamAmt + 0.2 + fw, fm) * step(0.001, foamAmt) * (1.0 - 0.45 * smoothstep(25.0, 120.0, dist));
   vec3 col = body * (1.0 - fres) + sky * fres + sunCol * glint;
-  col = mix(col, vec3(0.7, 0.72, 0.7) * lit * 1.2, foam);
+  col = mix(col, vec3(0.28, 0.34, 0.33) * lit, foam * 0.35);
   float alpha = (1.0 - smoothstep(0.62, 1.0, a)) * (0.5 + 0.45 * depthF) + fres * 0.3;
-  alpha = clamp(max(alpha, foam * (1.0 - smoothstep(0.85, 1.0, a))), 0.0, 1.0) * smoothstep(0.0, 1.0, vFade);
+  alpha = clamp(max(alpha, foam * 0.35 * (1.0 - smoothstep(0.85, 1.0, a))), 0.0, 1.0) * smoothstep(0.0, 1.0, vFade);
   gl_FragColor = vec4(aerial(col, vPos), alpha);
 }`;
     // the bank: a strip draped on the ground under and beside the water, the photo-scanned stones and gravel, dark where wet,
@@ -3665,8 +3666,13 @@ void main() {
   // ---------- hay meadows and trails (stage 3; refs ref/val-gardena 06, 25, 26): OSM meadows near the drive, about half mown
   // (short, lighter grass in mower stripes along the contours; some with rows of drying hay and Ladin hay stacks or wrapped bales),
   // the rest left to flower; OSM footpaths and farm tracks as worn strips draped on the ground. &nohay: off ----------
+  const ATV_ROUTES = await getJSON(MAP + 'atv_routes.json').catch(() => null);
   const LAND = QS.has('nohay') ? null : await getJSON(MAP + 'landscape.json').catch(() => null);
   if (LAND) {
+    if (ATV_ROUTES) for (const route of ATV_ROUTES.routes) {
+      if (LAND.paths[route.source_path]) LAND.paths[route.source_path].w = 3.4;
+      for (const p of route.spurs) LAND.paths.push({ k: 'track', g: 'grade3', w: 3.4, p });
+    }
     const LU = ['floatO', 'viewProjection', 'camPos', 'sunDir', 'sunCol', 'ambXp', 'ambXn', 'ambYp', 'ambYn', 'ambZp', 'ambZn', 'atm', 'fogP', 'fogCol', ...LEVEL_UNIFORMS];
     const hsh = (a) => { const s = Math.sin(a * 12.9898 + 4.1) * 43758.5453; return s - Math.floor(s); };
     const inPoly = (P, x, z) => { let c = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) { const a = P[i], b = P[j]; if ((a[1] > z) !== (b[1] > z) && x < (b[0] - a[0]) * (z - a[1]) / (b[1] - a[1] + 1e-9) + a[0]) c = !c; } return c; };
@@ -3783,6 +3789,35 @@ void main() {
     scene.onBeforeRenderObservable.add(() => { const now = performance.now(); if (now - lT < 300) return; lT = now; const p = scene.activeCamera.position;
       for (const c of lcells) { const on = Math.hypot(c.cx - p.x, c.cz - p.z) < c.r; if (c.m.isEnabled() !== on) c.m.setEnabled(on); } });
     window.__land = { mownC, meadows: LAND.meadows.length, mown: nMown, hay: nHay, trails: LAND.paths.length, trailPts: nTrail, meshes: lcells.length };
+    if (ATV_ROUTES) {
+      // Small trailhead markers and creekside resting places add readable detail without another texture or draw per prop.
+      const G = Geo(), O = [0, 0, 0];
+      for (const route of ATV_ROUTES.routes) {
+        const a = route.access, head = route.trailhead, next = a[route.road_end === 0 ? 1 : a.length - 2];
+        const dx = next[0] - head[0], dz = next[1] - head[1], len = Math.hypot(dx, dz) || 1;
+        let nx = -dz / len, nz = dx / len;
+        if (roadDist(head[0] + nx * 4, head[1] + nz * 4) < roadDist(head[0] - nx * 4, head[1] - nz * 4)) { nx = -nx; nz = -nz; }
+        const x = head[0] + nx * 4, z = head[1] + nz * 4, y = terrainH(x, z);
+        G.box(O, 0, x, y + 0.75, z, 0.055, 0.75, 0.055, C.woodOld);
+        G.box([x, y, z], Math.atan2(dx, dz), 0, 1.38, 0, 0.5, 0.17, 0.07, C.wood);
+        G.box([x, y, z], Math.atan2(dx, dz), 0, 1.39, 0.075, 0.34, 0.055, 0.02, [0.65, 0.23, 0.07]);
+        const bank = route.access[route.road_end === 0 ? route.access.length - 1 : 0];
+        const bx = bank[0] + nx * 4.4, bz = bank[1] + nz * 4.4, by = terrainH(bx, bz);
+        G.box(O, 0, bx, by + 0.22, bz, 0.7, 0.13, 0.18, C.woodOld);
+        for (const ox of [-0.53, 0.53]) G.box(O, 0, bx + ox, by + 0.1, bz, 0.09, 0.1, 0.12, C.wood);
+        for (const spur of route.spurs) for (let i = 5; i < spur.length; i += 5) {
+          const q = spur[i], q0 = spur[i - 1], q1 = spur[Math.min(spur.length - 1, i + 1)];
+          const vx = q1[0] - q0[0], vz = q1[1] - q0[1], vl = Math.hypot(vx, vz) || 1;
+          let sx = -vz / vl, sz = vx / vl;
+          const ya = terrainH(q[0] + sx * 3.8, q[1] + sz * 3.8), yb = terrainH(q[0] - sx * 3.8, q[1] - sz * 3.8);
+          if (yb > ya) { sx = -sx; sz = -sz; }
+          const cx = q[0] + sx * 3.8, cz = q[1] + sz * 3.8, cy = terrainH(cx, cz);
+          G.box(O, 0, cx, cy + 0.16, cz, 0.26, 0.16, 0.23, C.stone);
+          G.box(O, 0, cx + 0.03, cy + 0.34, cz, 0.18, 0.1, 0.16, C.stone);
+        }
+      }
+      for (const v of G.vds()) { const m = new BABYLON.Mesh('atvTrailDetails', scene); applyGeo(v, m); m.material = propMat; m.renderingGroupId = 1; m.isPickable = false; m.freezeWorldMatrix(); }
+    }
   }
   // ---------- Lake Garda: a water surface over the lake mask (shoreline = where the terrain rises above it), and a few sails ----------
   if (WATER) {
@@ -4490,6 +4525,7 @@ void main() {
   };
   ROUTE_LANE = (() => { const tree = []; for (const r of ROADS) if (r.class === 'motorway') r.points.forEach((p, i) => tree.push({ p, lane: r.cross[i].lane })); return ROUTE_PTS.map(p => { const q = tree.find(q => Math.abs(q.p[0] - p[0]) < 1.5 && Math.abs(q.p[2] - p[2]) < 1.5); return q ? q.lane : 1.6; }); })();
   const roadIndexNear = (x, z) => { let bi = 0, bd = Infinity; const P = ROUTE_PTS; for (let i = 0; i < P.length; i += 2) { const d = (P[i][0] - x) ** 2 + (P[i][2] - z) ** 2; if (d < bd) { bd = d; bi = i; } } return bi; };
+  let throttleBlend = 0;
   const spawnAt = (i) => {
     const P = ROUTE_PTS; i = Math.max(0, Math.min(P.length - 4, i)); const p = P[i], q = P[Math.min(P.length - 1, i + 3)], dx = q[0] - p[0], dz = q[2] - p[2], l = Math.hypot(dx, dz) || 1;
     const lo = ROUTE_LANE[i], x = p[0] + dz / l * lo, z = p[2] - dx / l * lo;       // right-hand lane
@@ -4497,6 +4533,7 @@ void main() {
     chassis.position.set(x, collisionH(x, z) + C0Y + 0.1, z);
     chassis.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.atan2(dx, dz));
     chassis.velocity.set(0, 0, 0); chassis.angularVelocity.set(0, 0, 0);
+    throttleBlend = 0;
     chase.reset = true;
   };
   const SAVE_KEY = 'po-dolomites-position-v1';
@@ -4508,18 +4545,19 @@ void main() {
     physWorld.defaultContactMaterial.friction = 0.3;
     car.rotationQuaternion = BABYLON.Quaternion.Identity(); car.position.set(0, 0, 0); car.computeWorldMatrix(true);
     const wpos = {}; for (const k of ['FL', 'FR', 'RL', 'RR']) { const n = scene.getTransformNodeByName('Wheel_' + k); n.computeWorldMatrix(true); wpos[k] = n.getAbsolutePosition().clone(); }
-    const K = 40, WR = Math.max(0.2, wpos.FL.y); C0Y = WR + (0.30 - 9.81 / (4 * K)) + 0.06;
+    const K = selectedCar.offroad ? 26 : 40, restLength = selectedCar.offroad ? 0.38 : 0.30;
+    const WR = Math.max(0.2, wpos.FL.y); C0Y = WR + (restLength - 9.81 / (4 * K)) + 0.06;
     const bb = car.getHierarchyBoundingVectors(true), bodyLen = bb.max.z - bb.min.z, bodyMid = (bb.max.z + bb.min.z) / 2;
     const halfTrack = Math.max(...Object.values(wpos).map((p) => Math.abs(p.x)));
-    chassis = new CANNON.Body({ mass: 1000 }); chassis.addShape(new CANNON.Box(new CANNON.Vec3(halfTrack + 0.05, 0.3, bodyLen / 2 - 0.06)), new CANNON.Vec3(0, 0.1, bodyMid));
+    chassis = new CANNON.Body({ mass: carDynamics.mass }); chassis.addShape(new CANNON.Box(new CANNON.Vec3(halfTrack + 0.05, 0.3, bodyLen / 2 - 0.06)), new CANNON.Vec3(0, 0.1, bodyMid));
     chassis.angularDamping = 0.4; physWorld.addBody(chassis);
     vehicle = new CANNON.RaycastVehicle({ chassisBody: chassis, indexRightAxis: 0, indexUpAxis: 1, indexForwardAxis: 2 });
     for (const k of ['FL', 'FR', 'RL', 'RR']) {
       const n = scene.getTransformNodeByName('Wheel_' + k); if (!n.rotationQuaternion) n.rotationQuaternion = BABYLON.Quaternion.Identity();
       const wp = wpos[k], r = Math.max(0.2, wp.y); wheels.push({ node: n, front: k[0] === 'F', r, spin: 0 });
-      vehicle.addWheel({ radius: r, directionLocal: new CANNON.Vec3(0, -1, 0), suspensionStiffness: K, suspensionRestLength: 0.30, frictionSlip: 3.2,
-        dampingRelaxation: 2.3, dampingCompression: 4.4, maxSuspensionForce: 200000, rollInfluence: 0.05, axleLocal: new CANNON.Vec3(1, 0, 0),
-        chassisConnectionPointLocal: new CANNON.Vec3(wp.x, -0.06 + (r - WR), wp.z), maxSuspensionTravel: 0.2, customSlidingRotationalSpeed: -30, useCustomSlidingRotationalSpeed: true });
+      vehicle.addWheel({ radius: r, directionLocal: new CANNON.Vec3(0, -1, 0), suspensionStiffness: K, suspensionRestLength: restLength, frictionSlip: carDynamics.grip,
+        dampingRelaxation: 2.3, dampingCompression: 4.4, maxSuspensionForce: 200000, rollInfluence: selectedCar.offroad ? 0.08 : 0.05, axleLocal: new CANNON.Vec3(1, 0, 0),
+        chassisConnectionPointLocal: new CANNON.Vec3(wp.x, -0.06 + (r - WR), wp.z), maxSuspensionTravel: selectedCar.offroad ? 0.36 : 0.2, customSlidingRotationalSpeed: -30, useCustomSlidingRotationalSpeed: true });
     }
     vehicle.addToWorld(physWorld);
     // Start at the eastern end of the existing SS243, facing toward the pass and Lake Garda.
@@ -4534,9 +4572,9 @@ void main() {
       const savePosition = (force = false) => {
         if (resumePrompt || (!driving && !force) || !chassis) return;
         const c = chassis.position, i = roadIndexNear(c.x, c.z), rp = ROUTE_PTS[i];
-        if (Math.hypot(c.x - rp[0], c.z - rp[2]) > 100 || Math.abs(c.y - collisionH(c.x, c.z)) > 8) return;
+        if (Math.hypot(c.x - rp[0], c.z - rp[2]) > (selectedCar.offroad ? 1200 : 100) || Math.abs(c.y - collisionH(c.x, c.z)) > 8) return;
         const q = chassis.quaternion;
-        try { localStorage.setItem(SAVE_KEY, JSON.stringify({ stamp: routeStamp, i, p: [c.x, c.y, c.z], q: [q.x, q.y, q.z, q.w] })); } catch (_) { /* private browsing may block storage */ }
+        try { localStorage.setItem(SAVE_KEY, JSON.stringify({ stamp: routeStamp, car: carId, i, p: [c.x, c.y, c.z], q: [q.x, q.y, q.z, q.w] })); } catch (_) { /* private browsing may block storage */ }
       };
       savePositionNow = () => savePosition(true);
       window.addEventListener('pagehide', () => savePosition());
@@ -4546,14 +4584,13 @@ void main() {
       try { saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (_) { /* ignore damaged storage */ }
       const valid = saved && saved.stamp === routeStamp && Number.isInteger(saved.i) && saved.i >= 0 && saved.i < ROUTE_PTS.length &&
         Array.isArray(saved.p) && saved.p.length === 3 && saved.p.every(Number.isFinite) && Array.isArray(saved.q) && saved.q.length === 4 && saved.q.every(Number.isFinite) &&
-        Math.hypot(saved.p[0] - ROUTE_PTS[saved.i][0], saved.p[2] - ROUTE_PTS[saved.i][2]) < 100 &&
+        Math.hypot(saved.p[0] - ROUTE_PTS[saved.i][0], saved.p[2] - ROUTE_PTS[saved.i][2]) < (saved.car === 'atv' ? 1200 : 100) &&
         Math.abs(saved.p[1] - collisionH(saved.p[0], saved.p[2])) < 8;
       const switchingCar = QS.has('switchcar');
       if (switchingCar) { const u = new URL(location.href); u.searchParams.delete('switchcar'); history.replaceState(null, '', u.href); }
       if (valid && switchingCar) {
         spawnAt(saved.i);
-        chassis.position.set(...saved.p);
-        chassis.quaternion.set(...saved.q);
+        if (selectedCar.offroad || saved.car !== 'atv') { chassis.position.set(...saved.p); chassis.quaternion.set(...saved.q); }
         chase.reset = true;
       } else if (valid) {
         driving = false;
@@ -4563,8 +4600,7 @@ void main() {
         const choose = (resume) => {
           if (resume) {
             spawnAt(saved.i);
-            chassis.position.set(...saved.p);
-            chassis.quaternion.set(...saved.q);
+            if (selectedCar.offroad || saved.car !== 'atv') { chassis.position.set(...saved.p); chassis.quaternion.set(...saved.q); }
             chase.reset = true;
           } else spawnAt(startI);
           resumePrompt.remove(); resumePrompt = null; driving = true;
@@ -4575,12 +4611,52 @@ void main() {
       }
     }
     const resetCar = () => spawnAt(roadIndexNear(chassis.position.x, chassis.position.z));
+    const spawnAtTrail = (route) => {
+      const p = route.trailhead, a = route.access, q = a[route.road_end === 0 ? 1 : a.length - 2];
+      const dx = q[0] - p[0], dz = q[1] - p[1];
+      placeHeightfield(p[0], p[1]);
+      chassis.position.set(p[0], collisionH(p[0], p[1]) + C0Y + 0.12, p[1]);
+      chassis.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.atan2(dx, dz));
+      chassis.velocity.set(0, 0, 0); chassis.angularVelocity.set(0, 0, 0);
+      throttleBlend = 0;
+      if (resumePrompt) { resumePrompt.remove(); resumePrompt = null; }
+      driving = true; chase.reset = true; savePositionNow();
+    };
     const cycleCamera = () => { camMode = (camMode + 1) % 3; chase.reset = true; if (camMode === 2) camera.attachControl(canvas, true); else camera.detachControl(); };
+    let clearTouch = () => {};
+    if (!['diag', 'autodrive', 'at', 'road'].some(k => QS.has(k))) {
+      const resetButton = document.createElement('button');
+      resetButton.type = 'button'; resetButton.id = 'resetDriveBtn'; resetButton.textContent = 'Reset';
+      resetButton.setAttribute('aria-label', 'Reset vehicle on road');
+      document.body.appendChild(resetButton);
+      resetButton.addEventListener('click', () => {
+        if (resumePrompt) { resumePrompt.remove(); resumePrompt = null; driving = true; }
+        clearTouch(); touchAxis.steer = 0; touchAxis.pedal = 0;
+        for (const key of Object.keys(keys)) keys[key] = false;
+        resetCar();
+      });
+    }
+    if (selectedCar.offroad && ATV_ROUTES && !['diag', 'autodrive', 'at', 'road'].some(k => QS.has(k))) {
+      const trailButton = document.createElement('button');
+      trailButton.type = 'button'; trailButton.id = 'atvTrailBtn'; trailButton.textContent = 'Stream trails';
+      trailButton.setAttribute('aria-label', 'Go to the next ATV stream trail');
+      document.body.appendChild(trailButton);
+      let nextTrail = 0;
+      trailButton.addEventListener('click', () => {
+        const route = ATV_ROUTES.routes[nextTrail++ % ATV_ROUTES.routes.length];
+        clearTouch(); for (const key of Object.keys(keys)) keys[key] = false;
+        spawnAtTrail(route);
+        let hint = document.getElementById('atvTrailHint');
+        if (!hint) { hint = document.createElement('div'); hint.id = 'atvTrailHint'; document.body.appendChild(hint); }
+        hint.textContent = route.name + ' — follow the dirt track to the water';
+        clearTimeout(hint.hideTimer); hint.hideTimer = setTimeout(() => hint.remove(), 6500);
+      });
+    }
     if (touchDriving) {
       document.body.classList.add('corridor-touch');
       const pad = document.createElement('div'); pad.id = 'driveTouch';
       // Two floating analog sticks: left steers, right controls gas and brake/reverse.
-      pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="reset" aria-label="Reset car on road">Reset</button><button type="button" data-action="fullscreen" aria-label="Use full screen">Full screen</button></div>' +
+      pad.innerHTML = '<div class="touch-actions"><button type="button" data-action="camera" aria-label="Change camera">Camera</button><button type="button" data-action="fullscreen" aria-label="Use full screen">Full screen</button></div>' +
         '<div class="stick-zone" data-stick="steer" aria-label="Steering joystick: drag left or right"><div class="stick"><span class="stick-dir steer-left">◀</span><span class="stick-dir steer-right">▶</span><div class="knob"></div></div><span class="stick-label">STEER</span></div>' +
         '<div class="stick-zone" data-stick="pedal" aria-label="Throttle joystick: drag up for gas, down to brake and reverse"><div class="stick"><span class="stick-dir pedal-gas">GAS</span><span class="stick-dir pedal-brake">BRAKE</span><div class="knob"></div></div><span class="stick-label">GAS / BRAKE</span></div>';
       document.body.appendChild(pad);
@@ -4673,12 +4749,12 @@ void main() {
         S.reset();
       }
       const clear = () => { for (const S of Object.values(sticks)) S.reset(); };
+      clearTouch = clear;
       window.addEventListener('blur', clear);
       window.addEventListener('pagehide', clear);
       window.addEventListener('resize', clear);
       document.addEventListener('visibilitychange', () => { if (document.hidden) clear(); });
       pad.querySelector('[data-action="camera"]').addEventListener('click', cycleCamera);
-      pad.querySelector('[data-action="reset"]').addEventListener('click', () => { clear(); resetCar(); });
     }
     if (!['shot', 'diag', 'autodrive', 'at', 'road'].some(k => QS.has(k))) {
       // The Po circuit toolbar is not wired in this world. Replace it with a corridor car chooser.
@@ -4775,18 +4851,26 @@ void main() {
     const kUp = on && (keys.ArrowUp || keys.KeyW || touchKeys.KeyW), kDown = on && (keys.ArrowDown || keys.KeyS || touchKeys.KeyS), kL = on && (keys.ArrowLeft || keys.KeyA || touchKeys.KeyA), kR = on && (keys.ArrowRight || keys.KeyD || touchKeys.KeyD), hand = !on || keys.Space || touchKeys.Space;
     const AP = autopilot && autopilot.on ? autopilot.step(chassis, fwdV, kmh) : null;     // test hook: follows the route, ?autodrive
     const keySteer = (kR ? 1 : 0) - (kL ? 1 : 0), stickSteer = on ? touchAxis.steer : 0;
-    const maxSteer = 0.42 + (0.09 - 0.42) * Math.min(1, kmh / 130), target = AP ? Math.max(-1, Math.min(1, AP.steer)) * maxSteer : (keySteer || stickSteer) * maxSteer;
+    const maxSteer = carDynamics.steerLow + (carDynamics.steerHigh - carDynamics.steerLow) * Math.min(1, kmh / carDynamics.steerFadeKmh);
+    const target = AP ? Math.max(-1, Math.min(1, AP.steer)) * maxSteer : (keySteer || stickSteer) * maxSteer;
     steer += (target - steer) * Math.min(1, dt * (target === 0 ? 4.0 : 2.4));
     let eng = 0, brake = 0;
     const pedal = on ? touchAxis.pedal : 0;      // touch pedal stick: up gas, down brake then reverse (analog)
     const thr = AP ? AP.thr : kUp && !kDown ? 1 : Math.max(0, pedal), brk = AP ? AP.brk : kDown ? 1 : Math.max(0, -pedal);
-    if (thr > 0) eng = -2500 * selectedCar.power * thr * Math.max(0, 1 - Math.pow(kmh / selectedCar.vmax, 1.6)) * (vF < -0.5 ? 1.4 : 1);
-    if (brk > 0) { if (vF > 0.8) brake = 60 * brk; else eng = 1100 * brk * Math.max(0, 1 - kmh / 35); }
-    if (!thr && !brk) brake = on ? 4 : 0;
-    if (!on) { eng = 0; brake = 100; }
-    for (let w = 0; w < 4; w++) { vehicle.applyEngineForce(w < 2 ? eng : 0, w); vehicle.setBrake(hand && w >= 2 ? (on ? 120 : 100) : brake, w); }
+    const requestedThrottle = brk > 0 ? 0 : thr;
+    throttleBlend += (requestedThrottle - throttleBlend) * Math.min(1, dt * (requestedThrottle > throttleBlend ? carDynamics.throttleRise : carDynamics.throttleFall));
+    const drivenWheels = carDynamics.drive === 'all' ? 4 : 2;
+    if (throttleBlend > 0) eng = -carDynamics.driveForce / drivenWheels * throttleBlend * Math.max(0, 1 - Math.pow(kmh / selectedCar.vmax, 1.6)) * (vF < -0.5 ? 1.4 : 1);
+    if (brk > 0) { if (vF > 0.8) brake = carDynamics.brake * brk; else eng = carDynamics.reverseForce / drivenWheels * brk * Math.max(0, 1 - kmh / 35); }
+    if (!thr && !brk) brake = on ? carDynamics.coastBrake : 0;
+    if (!on) { eng = 0; brake = 100; throttleBlend = 0; }
+    for (let w = 0; w < 4; w++) {
+      const driven = carDynamics.drive === 'all' || (carDynamics.drive === 'front' ? w < 2 : w >= 2);
+      vehicle.applyEngineForce(driven ? eng : 0, w);
+      vehicle.setBrake(hand && w >= 2 ? (on ? 120 : 100) : brake, w);
+    }
     vehicle.setSteeringValue(steer, 0); vehicle.setSteeringValue(steer, 1);
-    const sp = chassis.velocity.norm(); chassis.applyForce(chassis.velocity.scale(-0.45 * sp), chassis.position);
+    const sp = chassis.velocity.norm(); chassis.applyForce(chassis.velocity.scale(-carDynamics.drag * sp), chassis.position);
     if (Math.hypot(chassis.position.x - hf.cx, chassis.position.z - hf.cz) > HF_N * HF_TS * 0.25) placeHeightfield(chassis.position.x, chassis.position.z);
     prof('physics', () => physWorld.step(1 / 60, dt, 3));
     // fell off the world, or into the lake (only over the lake's mask and near its height: the Adige valley lies far below the water's world height)
@@ -4803,7 +4887,8 @@ void main() {
     });
     const cp = new V3(chassis.position.x, chassis.position.y, chassis.position.z), fw = new V3(fwdV.x, 0, fwdV.z).normalize();
     if (camMode < 2) {
-      const dist = camMode === 0 ? 6.4 : 12, hgt = camMode === 0 ? 2.1 : 3.8;
+      const dist = selectedCar.offroad ? (camMode === 0 ? 4.6 : 8.5) : (camMode === 0 ? 6.4 : 12);
+      const hgt = selectedCar.offroad ? (camMode === 0 ? 1.9 : 3.0) : (camMode === 0 ? 2.1 : 3.8);
       // Follow at a fixed horizontal distance: lagging the camera's position changes the apparent size of the car.
       // Smooth only the heading and height, with a fast rise and slower fall for ground clearance.
       const reset = chase.reset || !chase.heading || chase.height === null;

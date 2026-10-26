@@ -1,10 +1,10 @@
 {
-  "sourceCommit": "ea7bd9d020605fcdcd90b41fdb743604539cc285",
+  "sourceCommit": "e01f4d533ec7dcc871b4713f55da4a7ca0b67ca9",
   "entrypoint": "game/?spawn=dolomites",
   "cars": [
     "alfa33",
     "fiat500e",
-    "delta",
-    "mc20"
+    "mc20",
+    "atv"
   ]
 }

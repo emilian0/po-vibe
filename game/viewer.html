@@ -168,8 +168,8 @@
   const CARS = {
     alfa33:   { file: 'cars/alfa33.glb',   name: 'Alfa Romeo 33', blurb: '1992 Series 2 hatchback.' },
     fiat500e: { file: 'cars/fiat500e.glb', name: 'Fiat 500e',     blurb: '2020 electric three-door. The motor sits under the hood, the battery under the floor.' },
-    delta: { file: 'cars/delta.glb', name: 'Lancia Delta Integrale', blurb: '1991 Evoluzione: turbo four, four-wheel drive.' },
     mc20: { file: 'cars/mc20.glb', name: 'Maserati MC20', blurb: '2020 mid-engined V6 with butterfly doors.', doors: 'scissor' },
+    atv: { file: 'cars/atv.glb', name: 'Alpine ATV', blurb: 'Compact all-wheel-drive utility quad for the Val Gardena trails.' },
   };
   const CAR_ID = CARS[new URLSearchParams(location.search).get('car')] ? new URLSearchParams(location.search).get('car') : 'alfa33';
   const CAR = CARS[CAR_ID];
