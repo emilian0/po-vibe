@@ -1935,6 +1935,23 @@ void main() {
       quad(P(-hx, -hy, -hz), P(-hx, -hy, hz), P(-hx, hy, hz), P(-hx, hy, -hz), R(yaw, -1, 0, 0), k);
       quad(P(-hx, hy, hz), P(hx, hy, hz), P(hx, hy, -hz), P(-hx, hy, -hz), [0, 1, 0], k);
     };
+    // Smooth-shaded ellipsoid for grazing animals; the pasture cell stays one draw call.
+    const ellipsoid = (o, yaw, cx, cy, cz, rx, ry, rz, k) => {
+      room(); const base = pos.length / 3, sides = 8, bands = 5;
+      for (let j = 0; j <= bands; j++) for (let i = 0; i <= sides; i++) {
+        const u = i * Math.PI * 2 / sides, v = j * Math.PI / bands;
+        const px = Math.cos(u) * Math.sin(v), py = Math.cos(v), pz = Math.sin(u) * Math.sin(v);
+        pos.push(...T(o, yaw, cx + px * rx, cy + py * ry, cz + pz * rz));
+        const nn = R(yaw, px / rx, py / ry, pz / rz), nl = Math.hypot(...nn) || 1;
+        nrm.push(nn[0] / nl, nn[1] / nl, nn[2] / nl);
+        col.push(k[0], k[1], k[2], k[3] === undefined ? 1 : k[3]);
+      }
+      for (let j = 0; j < bands; j++) for (let i = 0; i < sides; i++) {
+        const a = base + j * (sides + 1) + i, b = a + 1, d = a + sides + 1, c = d + 1;
+        if (j > 0) idx.push(a, b, c);
+        if (j < bands - 1) idx.push(a, c, d);
+      }
+    };
     // gable roof over a w (x) by l (z) footprint at height y, ridge along z, rise h, overhang ov; gable ends in wall colour kw
     const roof = (o, yaw, y, w, l, h, ov, k, kw) => {
       const hx = w / 2 + ov, hz = l / 2 + ov, P = (x, yy, z) => T(o, yaw, x, yy, z), sl = Math.hypot(hx, h);
@@ -1960,7 +1977,7 @@ void main() {
     // vds() hands the chunks over and forgets them: the builders live on in cell maps, and keeping the chunks kept every
     // building's vertex arrays alive (214 MB) after upload (memory work, 2026-10-19)
     let tris = 0; const vds = () => { flush(); return chunks.splice(0); };
-    return { box, roof, hip, quad, vds, count: () => doneTris + idx.length / 3 };
+    return { box, ellipsoid, roof, hip, quad, vds, count: () => doneTris + idx.length / 3 };
   };
   // albedo targets; the 4th value picks the texture layer (assets/textures/props: 0 weathered boards, 1 dark planks, 2 plaster, 3 stone wall, 4 shingles, 5 galvanised steel)
   const L = (i) => (i + 0.5) / 8, LYR = L;     // LYR: same, for code where L is a building's length
@@ -3164,7 +3181,8 @@ void main() {
   });
   // ---------- grass and flowers around the camera: crossed cards on a jittered grid, 16 m tiles cached, shrinking away at the edge ----------
   // the near level's detail flags (bit 3 scree or outcrop, bit 4 forest floor), not its mask images: 32 MB less heap (2026-10-19)
-  const nearF = (x, z) => { const L = lvl('near'), c = Math.max(0, Math.min(N - 1, Math.floor((x + L.half) / L.res))), r = Math.max(0, Math.min(N - 1, Math.floor((L.half - z) / L.res))); return DETAIL_F.near[r * N + c]; };
+  const nearL = lvl('near');
+  const nearF = (x, z) => { const L = nearL, c = Math.max(0, Math.min(N - 1, Math.floor((x + L.half) / L.res))), r = Math.max(0, Math.min(N - 1, Math.floor((L.half - z) / L.res))); return DETAIL_F.near[r * N + c]; };
   const roadGrid = new Map(); for (const r of ROADS) { r.points.forEach((p, i) => { const ex = roadHalf(r, i) - 3.4; const k = Math.floor(p[0] / 16) + ',' + Math.floor(p[2] / 16); if (!roadGrid.has(k)) roadGrid.set(k, []); roadGrid.get(k).push([p[0], p[2], ex]); }); }
   const roadDist = (x, z) => { let d = 1e9; const gx = Math.floor(x / 16), gz = Math.floor(z / 16); for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) { const l = roadGrid.get((gx + i) + ',' + (gz + j)); if (l) for (const p of l) d = Math.min(d, Math.hypot(p[0] - x, p[1] - z) - p[2]); } return d; };
   const grassAtlas = (() => {
@@ -3254,6 +3272,17 @@ void main() {
     m.material = grassMat; m.renderingGroupId = 1; m.isPickable = false; m.alwaysSelectAsActiveMesh = true;
     m.thinInstanceSetBuffer('matrix', new Float32Array(16), 16, false); m.thinInstanceCount = 0; withA2C(m); return m;
   })();
+  // Exclude the actual stream beds and stony banks, including places where the
+  // terrain's broad open-ground flag still describes the surrounding pasture.
+  const streamGround = new Map(), SG = 16;
+  const inStreamBank = (x, z) => {
+    const gx = Math.floor(x / SG), gz = Math.floor(z / SG);
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+      const pts = streamGround.get((gx + a) + ',' + (gz + b));
+      if (pts) for (const p of pts) if (Math.hypot(x - p[0], z - p[1]) < p[2]) return true;
+    }
+    return false;
+  };
   const grassTiles = new Map(), GT = 16;
   const grassTile = (tx, tz) => {
     const key = tx + ',' + tz; if (grassTiles.has(key)) return grassTiles.get(key);
@@ -3261,8 +3290,11 @@ void main() {
     for (let j = 0; j < GT / sp; j++) for (let i = 0; i < GT / sp; i++) {
       const h1 = Math.sin((tx * 977 + i) * 12.9898 + (tz * 613 + j) * 78.233) * 43758.5453, r = h1 - Math.floor(h1), r2 = (r * 91.7) % 1, r3 = (r * 37.3) % 1;
       const x = tx * GT + (i + r2) * sp, z = tz * GT + (j + r3) * sp;
-      const f = nearF(x, z); if (f & 8) continue;          // scree, outcrops
+      const ground = detailAt(x, z); if (!ground || !ground.open) continue;   // no water, rock, scree or paved land
+      const f = levelWeight(nearL, x, z) > 0.5 ? nearF(x, z) : 0; if (f & 8) continue;
       if ((f & 16) && r < 0.7) continue;                  // forest floor: sparse
+      if (WATER && inLakeBox(x, z) && lakeMaskAt(x, z) && terrainH(x, z) < WATER.y + 0.15) continue;
+      if (inStreamBank(x, z)) continue;
       const hx = terrainH(x + 1, z) - terrainH(x - 1, z), hz = terrainH(x, z + 1) - terrainH(x, z - 1); if (Math.hypot(hx, hz) / 2 > 0.75) continue;   // steeper than ~37 deg
       if (roadDist(x, z) < half) continue;
       if (inBuilding(x, z)) continue;
@@ -3301,6 +3333,19 @@ void main() {
       const u = [dn[1] * s[2] - dn[2] * s[1], dn[2] * s[0] - dn[0] * s[2], dn[0] * s[1] - dn[1] * s[0]];
       const P = (p, i, j) => [p[0] + (s[0] * i + u[0] * j) * r, p[1] + (s[1] * i + u[1] * j) * r, p[2] + (s[2] * i + u[2] * j) * r];
       for (const [i0, j0, i1, j1, n] of [[-1, -1, 1, -1, u.map((v) => -v)], [1, -1, 1, 1, s], [1, 1, -1, 1, u], [-1, 1, -1, -1, s.map((v) => -v)]]) G.quad(P(a, i0, j0), P(a, i1, j1), P(b, i1, j1), P(b, i0, j0), n, k);
+    };
+    const roundBeam = (G, a, b, r, k) => {
+      const d = b.map((v, i) => v - a[i]), len = Math.hypot(...d) || 1, dn = d.map((v) => v / len);
+      let s = [dn[2], 0, -dn[0]], sl = Math.hypot(...s);
+      if (sl < 1e-3) { s = [1, 0, 0]; sl = 1; }
+      s = s.map((v) => v / sl);
+      const u = [dn[1] * s[2] - dn[2] * s[1], dn[2] * s[0] - dn[0] * s[2], dn[0] * s[1] - dn[1] * s[0]];
+      const P = (p, t) => p.map((v, i) => v + r * (s[i] * Math.cos(t) + u[i] * Math.sin(t)));
+      for (let i = 0; i < 8; i++) {
+        const t0 = i * Math.PI / 4, t1 = (i + 1) * Math.PI / 4, tm = (t0 + t1) / 2;
+        G.quad(P(a, t0), P(a, t1), P(b, t1), P(b, t0),
+          s.map((v, j) => v * Math.cos(tm) + u[j] * Math.sin(tm)), k);
+      }
     };
     // Ladin rail fence (stangenzaun): post pairs every 2.4 m, diagonal split rails leaning along the line, a top rail
     const FENCE = C.woodOld, FENCE_D = C.wood;
@@ -3357,13 +3402,15 @@ void main() {
     const COW = { sim: [[0.26, 0.09, 0.03], [0.42, 0.4, 0.36]], swiss: [[0.13, 0.105, 0.08], [0.17, 0.14, 0.11]], grey: [[0.2, 0.19, 0.17], [0.24, 0.23, 0.21]] };
     const animal = (type, x, z, yaw, graze, v) => {
       const G = pg(x, z), g = terrainH(x, z), o = [x, g, z], T = (lx, ly, lz) => [x + lx * Math.cos(yaw) + lz * Math.sin(yaw), g + ly, z - lx * Math.sin(yaw) + lz * Math.cos(yaw)];
-      // a rounded body: a wide flat box crossed with a narrow tall one (an octagon-ish section), with tapered ends
-      const blob = (oo, cx, cy, cz, hx, hy, hz, k) => { G.box(oo, yaw, cx, cy, cz, hx, hy * 0.72, hz, k); G.box(oo, yaw, cx, cy, cz, hx * 0.72, hy, hz * 0.94, k); G.box(oo, yaw, cx, cy, cz, hx * 0.8, hy * 0.8, hz * 1.06, k); };
+      const blob = (oo, cx, cy, cz, hx, hy, hz, k) => G.ellipsoid(oo, yaw, cx, cy, cz, hx, hy, hz, k);
       if (type === 'sheep') {
         const wool = [0.26 + v * 0.06, 0.245 + v * 0.05, 0.2 + v * 0.04], dark = [0.05, 0.045, 0.04];      // weathered wool, not paint white
         blob(o, 0, 0.64, 0, 0.27, 0.26, 0.48, wool);
-        const hy = graze ? 0.28 : 0.78; beam(G, T(0, 0.75, 0.42), T(0, hy + 0.08, 0.68), 0.09, wool); G.box(T(0, hy, 0.72), yaw, 0, 0, 0, 0.08, 0.1, 0.13, dark);
-        for (const [lx, lz] of [[-0.14, 0.32], [0.14, 0.32], [-0.14, -0.32], [0.14, -0.32]]) G.box(o, yaw, lx, 0.2, lz, 0.04, 0.2, 0.04, dark);
+        const hy = graze ? 0.28 : 0.78; roundBeam(G, T(0, 0.75, 0.42), T(0, hy + 0.08, 0.68), 0.09, wool); blob(o, 0, hy, 0.72, 0.09, 0.11, 0.15, dark);
+        for (const [lx, lz] of [[-0.14, 0.32], [0.14, 0.32], [-0.14, -0.32], [0.14, -0.32]]) {
+          blob(o, lx, 0.24, lz, 0.055, 0.23, 0.06, dark);
+          G.box(o, yaw, lx, 0.04, lz + 0.025, 0.06, 0.04, 0.08, dark);
+        }
         return;
       }
       const horse = type === 'horse', donkey = type === 'donkey';
@@ -3373,12 +3420,20 @@ void main() {
       blob(o, 0, hb, 0, hw, hy, hl, body);      // barrel
       blob(o, 0, hb + hy * 0.7, -hl * 0.7, hw * 0.85, hy * 0.35, hl * 0.28, body);      // hips
       blob(o, 0, hb + hy * 0.65, hl * 0.62, hw * 0.8, hy * 0.35, hl * 0.25, body);      // shoulders
-      if (!horse && !donkey && v < 0.5) G.box(o, yaw, 0, hb - 0.12, 0.1, hw + 0.01, 0.2, hl * 0.6, pale);      // Simmental: white belly patch
+      if (!horse && !donkey && v < 0.5) blob(o, 0, hb - hy * 0.55, 0.1, hw * 0.95, hy * 0.48, hl * 0.62, pale);      // Simmental belly
       const legC = !horse && !donkey && v < 0.5 ? pale : donkey ? body : horse ? [0.12, 0.05, 0.02] : body, lh = hb - hy * 0.6, lt = (horse ? 0.065 : 0.095) * sc;
-      for (const [lx, lz] of [[-hw * 0.6, hl * 0.72], [hw * 0.6, hl * 0.72], [-hw * 0.6, -hl * 0.75], [hw * 0.6, -hl * 0.75]]) { G.box(o, yaw, lx, lh / 2, lz, lt, lh / 2, lt, legC); G.box(o, yaw, lx, lh * 0.82, lz, lt * 1.35, lh * 0.2, lt * 1.6, body); }      // legs, thicker at the top
+      for (const [lx, lz] of [[-hw * 0.6, hl * 0.72], [hw * 0.6, hl * 0.72], [-hw * 0.6, -hl * 0.75], [hw * 0.6, -hl * 0.75]]) {
+        blob(o, lx, lh * 0.52, lz, lt * 1.1, lh * 0.52, lt * 1.1, legC);
+        G.box(o, yaw, lx, 0.06, lz + 0.04, lt * 1.2, 0.06, lt * 1.55, [0.06, 0.05, 0.045]);
+      }
       const nb = T(0, hb + 0.2 * sc, hl * 0.85), hd = graze ? T(0, 0.25 * sc, hl + (horse ? 1.05 : 0.7) * sc) : T(0, hb + (horse ? 0.75 : 0.35) * sc, hl + (horse ? 0.7 : 0.55) * sc);
-      beam(G, nb, hd, (horse ? 0.17 : 0.23) * sc, body);
+      roundBeam(G, nb, hd, (horse ? 0.17 : 0.23) * sc, body);
       const headC = !horse && !donkey && v < 0.5 ? pale : body; blob(hd, 0, 0, graze ? 0.12 * sc : 0.2 * sc, (horse ? 0.13 : 0.16) * sc, (horse ? 0.16 : 0.2) * sc, (horse ? 0.32 : 0.3) * sc, headC);
+      blob(hd, 0, -0.05 * sc, (horse ? 0.43 : 0.38) * sc, (horse ? 0.12 : 0.17) * sc, 0.105 * sc, 0.16 * sc, horse ? [0.24, 0.13, 0.08] : donkey ? pale : [0.35, 0.25, 0.23]);
+      for (const side of [-1, 1]) {
+        blob(hd, side * (horse ? 0.17 : 0.21) * sc, 0.13 * sc, 0.02, 0.105 * sc, 0.055 * sc, 0.12 * sc, headC);
+        blob(hd, side * (horse ? 0.126 : 0.15) * sc, 0.045 * sc, 0.16 * sc, 0.018 * sc, 0.018 * sc, 0.015 * sc, [0.018, 0.014, 0.012]);
+      }
       if (horse) beam(G, T(0, hb + 0.42, hl * 0.75), [hd[0], hd[1] + 0.22, hd[2]], 0.06, pale);      // blond mane
       if (donkey) for (const sx of [-1, 1]) beam(G, [hd[0], hd[1] + 0.12, hd[2]], T(sx * 0.12, (graze ? 0.62 : hb + 0.85) * sc, hl + 0.5 * sc), 0.035, body);      // long ears
       if (!horse && !donkey) for (const sx of [-1, 1]) beam(G, [hd[0], hd[1] + 0.12, hd[2]], [hd[0] + Math.cos(yaw) * sx * 0.22, hd[1] + 0.2, hd[2] - Math.sin(yaw) * sx * 0.22], 0.025, [0.35, 0.33, 0.28]);      // horns
@@ -3414,6 +3469,11 @@ void main() {
   // ---------- streams (stage 2; refs ref/val-gardena 12-16): the OSM streams of Val Gardena, carved as channels by the builder
   // (streams.json: water surface points), drawn as flowing ribbons; stone parapets where a road crosses one. &nostreams: off ----------
   const STREAMS = QS.has('nostreams') ? null : await getJSON(MAP + 'streams.json').catch(() => null);
+  if (STREAMS) for (const s of STREAMS.streams) for (const p of s.points) {
+    const key = Math.floor(p[0] / SG) + ',' + Math.floor(p[2] / SG);
+    if (!streamGround.has(key)) streamGround.set(key, []);
+    streamGround.get(key).push([p[0], p[2], s.width / 2 + 2.4]);
+  }
   if (STREAMS && STREAMS.streams.length) {
     // ripple normals and foam: tileable textures made here (no assets). Ripples: a sum of periodic waves, drawn out across the flow
     // (a stream's standing waves); foam: thresholded turbulence. Both are scrolled along the stream (its uv.y runs with the flow).
@@ -4610,7 +4670,17 @@ void main() {
         resumePrompt.querySelector('[data-resume="yes"]').focus();
       }
     }
-    const resetCar = () => spawnAt(roadIndexNear(chassis.position.x, chassis.position.z));
+    const resetCar = () => {
+      if (!selectedCar.offroad) { spawnAt(roadIndexNear(chassis.position.x, chassis.position.z)); return; }
+      const x = chassis.position.x, z = chassis.position.z;
+      const forward = chassis.quaternion.vmult(new CANNON.Vec3(0, 0, 1));
+      const yaw = Math.atan2(forward.x, forward.z);
+      placeHeightfield(x, z);
+      chassis.position.set(x, collisionH(x, z) + C0Y + 0.35, z);
+      chassis.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), yaw);
+      chassis.velocity.set(0, 0, 0); chassis.angularVelocity.set(0, 0, 0);
+      throttleBlend = 0; chase.reset = true; savePositionNow();
+    };
     const spawnAtTrail = (route) => {
       const p = route.trailhead, a = route.access, q = a[route.road_end === 0 ? 1 : a.length - 2];
       const dx = q[0] - p[0], dz = q[1] - p[1];
@@ -4627,7 +4697,7 @@ void main() {
     if (!['diag', 'autodrive', 'at', 'road'].some(k => QS.has(k))) {
       const resetButton = document.createElement('button');
       resetButton.type = 'button'; resetButton.id = 'resetDriveBtn'; resetButton.textContent = 'Reset';
-      resetButton.setAttribute('aria-label', 'Reset vehicle on road');
+      resetButton.setAttribute('aria-label', selectedCar.offroad ? 'Right ATV here' : 'Reset vehicle on road');
       document.body.appendChild(resetButton);
       resetButton.addEventListener('click', () => {
         if (resumePrompt) { resumePrompt.remove(); resumePrompt = null; driving = true; }
